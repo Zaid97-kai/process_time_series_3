@@ -27,9 +27,9 @@ for col in numeric_cols:
     if df[col].dtype == 'object':
         df[col] = df[col].str.replace(',', '.').astype(float)
 
-# Входные признаки и целевая переменная
-feature_columns = ['left_ear', 'right_ear']
-target_columns = ['mar']  # Теперь одна целевая переменная
+# Входные признаки и целевые переменные - теперь все три параметра
+feature_columns = ['left_ear', 'right_ear', 'mar']  # Все три параметра как входные
+target_columns = ['left_ear', 'right_ear', 'mar']   # Все три параметра как целевые
 
 # ================================================
 # ФУНКЦИЯ СГЛАЖИВАНИЯ ДАННЫХ
@@ -41,7 +41,7 @@ def smooth_data(df, window_size=3, method='moving_average'):
     df_smoothed = df.copy()
     
     # Список колонок для сглаживания (все числовые колонки)
-    columns_to_smooth = feature_columns + target_columns
+    columns_to_smooth = ['left_ear', 'right_ear', 'mar']
     
     # Применяем сглаживание отдельно для каждого файла
     for file_name in df_smoothed['file_name'].unique():
@@ -215,7 +215,7 @@ print("Сегменты сохранены в 'segmented_time_series.xlsx'")
 # ВЫЧИСЛЕНИЕ ВРЕМЕННЫХ ХАРАКТЕРИСТИК ДЛЯ КАЖДОГО ФАЙЛА/СЕГМЕНТА
 # ================================================
 
-def calculate_temporal_features(segment_df, feature_columns=feature_columns):
+def calculate_temporal_features(segment_df, feature_columns=['left_ear', 'right_ear', 'mar']):
     """
     Вычисляет временные характеристики для сегмента (файла)
     """
@@ -272,44 +272,14 @@ def calculate_temporal_features(segment_df, feature_columns=feature_columns):
             else:
                 features[prefix + 'cv'] = 0
     
-    # Характеристики для целевой переменной mar
-    if 'mar' in segment_df.columns:
-        mar_data = segment_df['mar'].values
-        features['mar_min'] = np.min(mar_data)
-        features['mar_max'] = np.max(mar_data)
-        features['mar_mean'] = np.mean(mar_data)
-        features['mar_median'] = np.median(mar_data)
-        features['mar_std'] = np.std(mar_data)
-        features['mar_variance'] = np.var(mar_data)
-        
-        if len(mar_data) > 1:
-            features['mar_trend'] = np.polyfit(range(len(mar_data)), mar_data, 1)[0]
-            features['mar_autocorr'] = pd.Series(mar_data).autocorr()
-            
-            # Динамика MAR
-            mar_diff = np.diff(mar_data)
-            features['mar_diff_mean'] = np.mean(mar_diff)
-            features['mar_diff_std'] = np.std(mar_diff)
-            features['mar_diff_max'] = np.max(np.abs(mar_diff))
-        else:
-            features['mar_trend'] = 0
-            features['mar_autocorr'] = 0
-            features['mar_diff_mean'] = 0
-            features['mar_diff_std'] = 0
-            features['mar_diff_max'] = 0
-        
-        # Стабильность MAR
-        if np.mean(mar_data) != 0:
-            features['mar_cv'] = np.std(mar_data) / np.mean(mar_data)
-        else:
-            features['mar_cv'] = 0
-    
     # Корреляция между признаками
     if len(feature_columns) >= 2 and all(col in segment_df.columns for col in feature_columns):
         if len(segment_df) > 1:
             corr_matrix = segment_df[feature_columns].corr()
-            if len(feature_columns) == 2:
-                features['corr_left_right'] = corr_matrix.iloc[0, 1]
+            if len(feature_columns) >= 2:
+                features['corr_left_right'] = corr_matrix.loc['left_ear', 'right_ear']
+                features['corr_left_mar'] = corr_matrix.loc['left_ear', 'mar']
+                features['corr_right_mar'] = corr_matrix.loc['right_ear', 'mar']
     
     return features
 
@@ -318,7 +288,7 @@ print("\n--- Вычисление временных характеристик 
 features_list = []
 
 for i, segment in enumerate(segments):
-    features = calculate_temporal_features(segment, feature_columns)
+    features = calculate_temporal_features(segment, ['left_ear', 'right_ear', 'mar'])
     features['segment_id'] = i + 1
     features['file_name'] = segment['file_name_original'].iloc[0]
     features['total_frames'] = len(segment)
@@ -326,7 +296,8 @@ for i, segment in enumerate(segments):
     
     if i < 5:  # Показываем информацию о первых 5 файлах
         print(f"  Сегмент {i+1}: {segment['file_name_original'].iloc[0]} - {len(segment)} кадров, "
-              f"left_ear: {features['left_ear_mean']:.4f}, right_ear: {features['right_ear_mean']:.4f}")
+              f"left_ear: {features['left_ear_mean']:.4f}, right_ear: {features['right_ear_mean']:.4f}, "
+              f"mar: {features['mar_mean']:.4f}")
 
 features_df = pd.DataFrame(features_list)
 
@@ -440,7 +411,6 @@ if len(X) > 1 and X.shape[0] > 1:
     cluster_labels = dbscan.fit_predict(X_scaled)
     
     # Преобразуем метки: -1 становится отдельным кластером (шум)
-    # Или можно оставить как -1 для обозначения шума
     features_df['cluster'] = cluster_labels
     
     # Статистика по кластерам
@@ -454,7 +424,6 @@ if len(X) > 1 and X.shape[0] > 1:
     print(f"  Параметры: eps={best_eps}, min_samples={best_min_samples}")
     
     # Переиндексируем кластеры, чтобы шум (-1) стал последним кластером
-    # Это нужно для удобства дальнейшей обработки
     cluster_mapping = {}
     new_cluster_labels = np.zeros_like(cluster_labels)
     
@@ -555,13 +524,14 @@ else:
     scaler = None
 
 # ================================================
-# УЛУЧШЕННАЯ ПОДГОТОВКА ДАННЫХ ДЛЯ LSTM
+# УЛУЧШЕННАЯ ПОДГОТОВКА ДАННЫХ ДЛЯ LSTM (ВСЕ 3 ПАРАМЕТРА)
 # ================================================
 
 def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequence_length=10, 
                                validation_split=0.10, test_samples=30):
     """
     Улучшенная подготовка данных для обучения LSTM с нормализацией и разделением
+    Теперь вход и выход - все три параметра
     """
     # Проверяем, что в сегменте достаточно данных
     min_required = sequence_length + 1 + test_samples
@@ -578,8 +548,8 @@ def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequ
     
     # Создаем последовательности
     for i in range(len(X_data) - sequence_length):
-        X.append(X_data[i:i+sequence_length])
-        y.append(y_data[i+sequence_length])
+        X.append(X_data[i:i+sequence_length])  # Вход: sequence_length временных шагов
+        y.append(y_data[i+sequence_length])    # Выход: следующий временной шаг
     
     if len(X) < 50:  # Минимальное количество последовательностей
         print(f"Слишком мало последовательностей: {len(X)}")
@@ -589,6 +559,7 @@ def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequ
     y = np.array(y)
     
     print(f"Создано {len(X)} последовательностей")
+    print(f"Размер входа: {X.shape}, размер выхода: {y.shape}")
     
     # Разделяем данные на train/validation/test
     total_samples = len(X)
@@ -613,7 +584,7 @@ def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequ
     X_scalers = []
     y_scalers = []
     
-    # Нормализация признаков
+    # Нормализация признаков (вход)
     X_train_scaled = np.zeros_like(X_train)
     X_val_scaled = np.zeros_like(X_val)
     X_test_scaled = np.zeros_like(X_test)
@@ -640,7 +611,7 @@ def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequ
         
         X_scalers.append(feature_scaler)
     
-    # Нормализация целевых переменных
+    # Нормализация целевых переменных (выход)
     y_train_scaled = np.zeros_like(y_train)
     y_val_scaled = np.zeros_like(y_val)
     y_test_scaled = np.zeros_like(y_test)
@@ -671,13 +642,13 @@ def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequ
             X_test_scaled, y_test_scaled, X_scalers, y_scalers)
 
 # ================================================
-# УЛУЧШЕННАЯ АРХИТЕКТУРА LSTM С РЕГУЛЯРИЗАЦИЕЙ
+# УЛУЧШЕННАЯ АРХИТЕКТУРА LSTM С РЕГУЛЯРИЗАЦИЕЙ (3 ВЫХОДА)
 # ================================================
 
 def create_improved_lstm_model(input_shape, output_shape, dropout_rate=0.3, 
                               recurrent_dropout=0.2, l2_reg=0.001):
     """
-    Создает улучшенную модель LSTM с регуляризацией
+    Создает улучшенную модель LSTM с регуляризацией для прогнозирования 3 параметров
     """
     from tensorflow.keras.regularizers import l2
     
@@ -708,13 +679,14 @@ def create_improved_lstm_model(input_shape, output_shape, dropout_rate=0.3,
         Dense(32, activation='relu', kernel_regularizer=l2(l2_reg)),
         Dropout(dropout_rate),
         
+        # Выходной слой с 3 нейронами (left_ear, right_ear, mar)
         Dense(output_shape)
     ])
     
     return model
 
 # ================================================
-# КОМПЛЕКСНАЯ СТРАТЕГИЯ ОБУЧЕНИЯ
+# КОМПЛЕКСНАЯ СТРАТЕГИЯ ОБУЧЕНИЯ (ДЛЯ 3 ВЫХОДОВ)
 # ================================================
 
 def train_lstm_with_strategy(X_train, y_train, X_val, y_val, 
@@ -726,7 +698,7 @@ def train_lstm_with_strategy(X_train, y_train, X_val, y_val,
     import tempfile
     
     input_shape = (X_train.shape[1], X_train.shape[2])
-    output_shape = len(target_columns)
+    output_shape = len(target_columns)  # Теперь 3 выхода
     
     strategies = [
         {'name': 'baseline', 'dropout': 0.2, 'l2_reg': 0.0, 'lr': 0.001},
@@ -753,8 +725,8 @@ def train_lstm_with_strategy(X_train, y_train, X_val, y_val,
         # Компилируем с текущей стратегией
         model.compile(
             optimizer=Adam(learning_rate=strategy['lr']),
-            loss='mse',
-            metrics=['mae', 'mape']
+            loss='mse',  # MSE для многомерного выхода
+            metrics=['mae']  # MAE для каждого выхода
         )
         
         # Callbacks
@@ -836,15 +808,15 @@ def analyze_and_preprocess_segment(segment, feature_columns, target_columns):
     print(f"\n  Анализ сегмента перед обучением:")
     
     # Анализ данных
-    stats = segment[feature_columns + target_columns].describe()
+    stats = segment[feature_columns].describe()
     print(f"    Статистика признаков:")
-    for col in feature_columns + target_columns:
+    for col in feature_columns:
         print(f"      {col}: mean={segment[col].mean():.4f}, std={segment[col].std():.4f}, "
               f"min={segment[col].min():.4f}, max={segment[col].max():.4f}")
     
     # Проверка на выбросы
     segment_copy = segment.copy()
-    for col in feature_columns + target_columns:
+    for col in feature_columns:
         q1 = segment_copy[col].quantile(0.25)
         q3 = segment_copy[col].quantile(0.75)
         iqr = q3 - q1
@@ -860,77 +832,80 @@ def analyze_and_preprocess_segment(segment, feature_columns, target_columns):
             segment_copy.loc[segment_copy[col] < lower_bound, col] = lower_bound
             segment_copy.loc[segment_copy[col] > upper_bound, col] = upper_bound
     
-    # Проверка стационарности (простой тест)
-    for col in target_columns:
-        autocorr = segment_copy[col].autocorr()
-        print(f"    Автокорреляция {col}: {autocorr:.4f}")
-        
-        # Если высокая автокорреляция, можно применить дифференцирование
-        if abs(autocorr) > 0.8:
-            print(f"    Высокая автокорреляция, применяем дифференцирование...")
-            segment_copy[f'{col}_diff'] = segment_copy[col].diff().fillna(0)
-    
     return segment_copy
 
 # ================================================
-# ВИЗУАЛИЗАЦИЯ ПРОГНОЗОВ ДЛЯ ВСЕГО СЕГМЕНТА
+# ВИЗУАЛИЗАЦИЯ ПРОГНОЗОВ ДЛЯ ВСЕГО СЕГМЕНТА (3 ПАРАМЕТРА)
 # ================================================
 
-def visualize_segment_predictions(segment_df, predictions, actuals, cluster_id, file_name, sequence_length=10):
+def visualize_segment_predictions(segment_df, predictions, actuals, cluster_id, file_name, 
+                                 feature_names, sequence_length=10):
     """
-    Создает график с прогнозами для всего сегмента
+    Создает график с прогнозами для всего сегмента для всех 3 параметров
     """
-    plt.figure(figsize=(15, 8))
+    fig, axes = plt.subplots(3, 1, figsize=(15, 12))
     
     # Получаем временные метки
     time_indices = np.arange(len(predictions))
     
-    # График прогнозов vs фактические значения
-    plt.plot(time_indices, actuals, label='Фактические значения', 
-             color='blue', alpha=0.7, linewidth=2)
-    plt.plot(time_indices, predictions, label='Прогнозы LSTM', 
-             color='red', alpha=0.7, linewidth=2, linestyle='--')
+    # Для каждого параметра создаем свой график
+    for idx, param_name in enumerate(feature_names):
+        actual_values = actuals[:, idx]
+        predicted_values = predictions[:, idx]
+        
+        # График прогнозов vs фактические значения
+        axes[idx].plot(time_indices, actual_values, label='Фактические значения', 
+                      color='blue', alpha=0.7, linewidth=2)
+        axes[idx].plot(time_indices, predicted_values, label='Прогнозы LSTM', 
+                      color='red', alpha=0.7, linewidth=2, linestyle='--')
+        
+        # Заполняем область между линиями
+        axes[idx].fill_between(time_indices, actual_values, predicted_values, 
+                             where=(predicted_values >= actual_values), 
+                             color='red', alpha=0.2, label='Переоценка')
+        axes[idx].fill_between(time_indices, actual_values, predicted_values, 
+                             where=(predicted_values < actual_values), 
+                             color='blue', alpha=0.2, label='Недооценка')
+        
+        # Расчет ошибок
+        errors = predicted_values - actual_values
+        mape = np.mean(np.abs(errors / (actual_values + 1e-10))) * 100
+        mae = np.mean(np.abs(errors))
+        
+        # Добавляем информацию о качестве
+        axes[idx].text(0.02, 0.95, f'{param_name}\nMAPE: {mape:.2f}%\nMAE: {mae:.4f}', 
+                     transform=axes[idx].transAxes,
+                     fontsize=10, verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        axes[idx].set_xlabel('Временной индекс', fontsize=10)
+        axes[idx].set_ylabel(param_name, fontsize=10)
+        axes[idx].legend(loc='best')
+        axes[idx].grid(True, alpha=0.3)
     
-    # Заполняем область между линиями
-    plt.fill_between(time_indices, actuals, predictions, 
-                     where=(predictions >= actuals), 
-                     color='red', alpha=0.2, label='Переоценка')
-    plt.fill_between(time_indices, actuals, predictions, 
-                     where=(predictions < actuals), 
-                     color='blue', alpha=0.2, label='Недооценка')
-    
-    # Расчет ошибок
-    errors = predictions - actuals
-    mape = np.mean(np.abs(errors / (actuals + 1e-10))) * 100
-    mae = np.mean(np.abs(errors))
-    
-    # Добавляем информацию о качестве
-    plt.text(0.02, 0.95, f'Кластер: {cluster_id}\nФайл: {file_name[:30]}...\n'
-             f'MAPE: {mape:.2f}%\nMAE: {mae:.4f}', 
-             transform=plt.gca().transAxes,
-             fontsize=10, verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    plt.xlabel('Временной индекс (смещение от начала последовательности)', fontsize=12)
-    plt.ylabel('MAR', fontsize=12)
-    plt.title(f'Прогнозы LSTM для всего сегмента (Кластер {cluster_id})', fontsize=14)
-    plt.legend(loc='best')
-    plt.grid(True, alpha=0.3)
-    
+    plt.suptitle(f'Прогнозы LSTM для всего сегмента (Кластер {cluster_id})\n{file_name[:50]}...', 
+                 fontsize=14, y=1.02)
     plt.tight_layout()
-    plt.savefig(f'segment_predictions_cluster_{cluster_id}.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'segment_predictions_cluster_{cluster_id}_all_params.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    return mape, mae
+    # Создаем суммарную метрику
+    total_mape = np.mean([np.mean(np.abs(predictions[:, i] - actuals[:, i]) / (actuals[:, i] + 1e-10)) * 100 
+                          for i in range(len(feature_names))])
+    total_mae = np.mean([np.mean(np.abs(predictions[:, i] - actuals[:, i])) 
+                         for i in range(len(feature_names))])
+    
+    return total_mape, total_mae
 
 # ================================================
-# ПРОГНОЗИРОВАНИЕ ДЛЯ ОДНОГО СЕГМЕНТА КАЖДОГО КЛАСТЕРА
+# ПРОГНОЗИРОВАНИЕ ДЛЯ ОДНОГО СЕГМЕНТА КАЖДОГО КЛАСТЕРА (3 ПАРАМЕТРА)
 # ================================================
 
 def predict_for_single_segment(cluster_id, segment_df, model, X_scalers, y_scalers, 
                               feature_columns, target_columns, sequence_length=10):
     """
     Прогнозирует значения для одного сегмента с использованием обученной модели
+    Возвращает прогнозы для всех 3 параметров
     """
     # Подготавливаем данные для прогнозирования
     X_data = segment_df[feature_columns].values
@@ -962,43 +937,67 @@ def predict_for_single_segment(cluster_id, segment_df, model, X_scalers, y_scale
                 y_pred_scaled[:, target_idx].reshape(-1, 1)
             ).flatten()[0]
         
-        predictions.append(y_pred[0])
-        actuals.append(y_data[i][0])
+        predictions.append(y_pred)
+        actuals.append(y_data[i])
     
     # Создаем DataFrame с результатами
-    results_df = pd.DataFrame({
-        'frame_number': segment_df['frame_number'].iloc[sequence_length:].values,
-        'actual_mar': actuals,
-        'predicted_mar': predictions,
-        'error': np.array(predictions) - np.array(actuals),
-        'absolute_error': np.abs(np.array(predictions) - np.array(actuals))
-    })
+    predictions_array = np.array(predictions)
+    actuals_array = np.array(actuals)
     
-    # Расчет метрик
-    if len(actuals) > 0:
-        results_df['percentage_error'] = (results_df['error'] / results_df['actual_mar']) * 100
-        
-        mape = np.mean(np.abs(results_df['percentage_error']))
-        mae = np.mean(results_df['absolute_error'])
-        rmse = np.sqrt(np.mean(results_df['error']**2))
-        
-        metrics = {
-            'mape': mape,
-            'mae': mae,
-            'rmse': rmse,
-            'total_predictions': len(predictions)
-        }
-    else:
-        metrics = None
+    results_dict = {
+        'frame_number': segment_df['frame_number'].iloc[sequence_length:].values
+    }
     
-    return results_df, metrics
+    # Добавляем данные для каждого параметра
+    for idx, param_name in enumerate(target_columns):
+        results_dict[f'actual_{param_name}'] = actuals_array[:, idx]
+        results_dict[f'predicted_{param_name}'] = predictions_array[:, idx]
+        results_dict[f'error_{param_name}'] = predictions_array[:, idx] - actuals_array[:, idx]
+        results_dict[f'absolute_error_{param_name}'] = np.abs(predictions_array[:, idx] - actuals_array[:, idx])
+    
+    results_df = pd.DataFrame(results_dict)
+    
+    # Расчет метрик для каждого параметра
+    metrics = {}
+    for idx, param_name in enumerate(target_columns):
+        actual_values = actuals_array[:, idx]
+        predicted_values = predictions_array[:, idx]
+        
+        if len(actual_values) > 0:
+            errors = predicted_values - actual_values
+            
+            # Защита от деления на ноль
+            valid_idx = np.abs(actual_values) > 1e-10
+            if np.any(valid_idx):
+                mape = np.mean(np.abs(errors[valid_idx] / actual_values[valid_idx])) * 100
+            else:
+                mape = np.mean(np.abs(errors)) * 100
+            
+            mae = np.mean(np.abs(errors))
+            rmse = np.sqrt(np.mean(errors**2))
+            
+            metrics[param_name] = {
+                'mape': mape,
+                'mae': mae,
+                'rmse': rmse
+            }
+    
+    # Общие метрики
+    metrics['total'] = {
+        'total_predictions': len(predictions),
+        'avg_mape': np.mean([metrics[param]['mape'] for param in target_columns]),
+        'avg_mae': np.mean([metrics[param]['mae'] for param in target_columns]),
+        'avg_rmse': np.mean([metrics[param]['rmse'] for param in target_columns])
+    }
+    
+    return results_df, metrics, predictions_array, actuals_array
 
 # ================================================
-# ОБУЧЕНИЕ LSTM С УЛУЧШЕННОЙ СТРАТЕГИЕЙ
+# ОБУЧЕНИЕ LSTM С УЛУЧШЕННОЙ СТРАТЕГИЕЙ (3 ВЫХОДА)
 # ================================================
 
 print("\n" + "="*60)
-print("УЛУЧШЕННОЕ ОБУЧЕНИЕ LSTM МОДЕЛЕЙ")
+print("УЛУЧШЕННОЕ ОБУЧЕНИЕ LSTM МОДЕЛЕЙ (3 ВЫХОДА)")
 print("="*60)
 
 lstm_models = {}
@@ -1031,11 +1030,12 @@ for cluster_id in range(optimal_k):
                 'segment_id': seg_id + 1,
                 'file_name': segment['file_name_original'].iloc[0],
                 'frames': len(segment),
-                'mar_mean': segment['mar'].mean(),
-                'mar_std': segment['mar'].std(),
-                'mar_range': segment['mar'].max() - segment['mar'].min(),
                 'left_ear_mean': segment['left_ear'].mean(),
                 'right_ear_mean': segment['right_ear'].mean(),
+                'mar_mean': segment['mar'].mean(),
+                'left_ear_std': segment['left_ear'].std(),
+                'right_ear_std': segment['right_ear'].std(),
+                'mar_std': segment['mar'].std(),
                 'sequences': max(0, len(segment) - 10)  # Оценка количества последовательностей
             }
             segment_stats.append(stats)
@@ -1047,12 +1047,18 @@ for cluster_id in range(optimal_k):
     # 1. Достаточное количество данных
     # 2. Умеренная дисперсия (не слишком шумный)
     # 3. Средние значения близки к средним по кластеру
+    cluster_left_mean = features_df[features_df['cluster'] == cluster_id]['left_ear_mean'].mean()
+    cluster_right_mean = features_df[features_df['cluster'] == cluster_id]['right_ear_mean'].mean()
     cluster_mar_mean = features_df[features_df['cluster'] == cluster_id]['mar_mean'].mean()
     
     # Вычисляем рейтинг для каждого сегмента
     segment_stats_df['data_sufficiency'] = segment_stats_df['sequences'] / segment_stats_df['sequences'].max()
-    segment_stats_df['stability'] = 1 / (1 + segment_stats_df['mar_std'])
-    segment_stats_df['representativeness'] = 1 / (1 + abs(segment_stats_df['mar_mean'] - cluster_mar_mean))
+    segment_stats_df['stability'] = 1 / (1 + (segment_stats_df['left_ear_std'] + 
+                                            segment_stats_df['right_ear_std'] + 
+                                            segment_stats_df['mar_std']) / 3)
+    segment_stats_df['representativeness'] = 1 / (1 + (abs(segment_stats_df['left_ear_mean'] - cluster_left_mean) +
+                                                     abs(segment_stats_df['right_ear_mean'] - cluster_right_mean) +
+                                                     abs(segment_stats_df['mar_mean'] - cluster_mar_mean)) / 3)
     segment_stats_df['rating'] = (
         segment_stats_df['data_sufficiency'] * 0.4 +
         segment_stats_df['stability'] * 0.3 +
@@ -1069,6 +1075,9 @@ for cluster_id in range(optimal_k):
     print(f"  Рейтинг: {best_segment_info['rating']:.3f}")
     print(f"  Кадров: {best_segment_info['frames']}, "
           f"последовательностей: {best_segment_info['sequences']}")
+    print(f"  Средние значения: left_ear={best_segment_info['left_ear_mean']:.4f}, "
+          f"right_ear={best_segment_info['right_ear_mean']:.4f}, "
+          f"mar={best_segment_info['mar_mean']:.4f}")
     
     # Сохраняем информацию о выбранном сегменте
     cluster_segment_samples[cluster_id] = {
@@ -1076,14 +1085,15 @@ for cluster_id in range(optimal_k):
         'file_name': best_segment_info['file_name'],
         'frames_count': best_segment_info['frames'],
         'rating': best_segment_info['rating'],
+        'left_ear_mean': best_segment_info['left_ear_mean'],
+        'right_ear_mean': best_segment_info['right_ear_mean'],
         'mar_mean': best_segment_info['mar_mean'],
-        'mar_std': best_segment_info['mar_std'],
         'cluster': cluster_id
     }
     
     # Анализ и предобработка данных
     processed_segment = analyze_and_preprocess_segment(
-        selected_segment, feature_columns, target_columns
+        selected_segment, feature_columns, feature_columns  # Используем одни и те же колонки для входа и выхода
     )
     
     # Подготавливаем улучшенные данные для LSTM (теперь всего 30 тестовых записей)
@@ -1114,7 +1124,7 @@ for cluster_id in range(optimal_k):
     training_strategies[cluster_id] = strategy_results
     
     # Сохранение модели
-    model.save(f'lstm_model_cluster_{cluster_id}_improved.keras')
+    model.save(f'lstm_model_cluster_{cluster_id}_improved_3outputs.keras')
     lstm_models[cluster_id] = model
     
     # Сохраняем скалеры
@@ -1137,92 +1147,111 @@ for cluster_id in range(optimal_k):
                 y_test[:, target_idx].reshape(-1, 1)
             ).flatten()
         
-        # Расчет ошибок с защитой от деления на ноль
-        errors = y_pred - y_true_original
-        absolute_errors = np.abs(errors)
-        
-        # Улучшенный расчет MAPE
-        safe_mape = []
-        for i in range(len(y_true_original)):
-            true_val = y_true_original[i][0]
-            pred_val = y_pred[i][0]
+        # Расчет ошибок для каждого параметра
+        metrics_by_param = {}
+        for idx, param_name in enumerate(target_columns):
+            errors = y_pred[:, idx] - y_true_original[:, idx]
+            absolute_errors = np.abs(errors)
             
-            if abs(true_val) > 1e-10:  # Избегаем деления на очень маленькие числа
-                error_pct = abs((pred_val - true_val) / true_val) * 100
-                safe_mape.append(error_pct)
-            else:
-                # Если true значение близко к 0, используем абсолютную ошибку
-                safe_mape.append(abs(pred_val - true_val) * 100)  # Умножаем на 100 для согласованности
+            # Улучшенный расчет MAPE
+            safe_mape = []
+            for i in range(len(y_true_original)):
+                true_val = y_true_original[i, idx]
+                pred_val = y_pred[i, idx]
+                
+                if abs(true_val) > 1e-10:  # Избегаем деления на очень маленькие числа
+                    error_pct = abs((pred_val - true_val) / true_val) * 100
+                    safe_mape.append(error_pct)
+                else:
+                    # Если true значение близко к 0, используем абсолютную ошибку
+                    safe_mape.append(abs(pred_val - true_val) * 100)
+            
+            mape_value = np.mean(safe_mape) if safe_mape else 0
+            mae_value = np.mean(absolute_errors)
+            rmse_value = np.sqrt(np.mean(errors**2))
+            
+            metrics_by_param[param_name] = {
+                'mape': mape_value,
+                'mae': mae_value,
+                'rmse': rmse_value
+            }
         
-        mape_value = np.mean(safe_mape) if safe_mape else 0
+        # Общие метрики
+        total_mape = np.mean([metrics['mape'] for metrics in metrics_by_param.values()])
+        total_mae = np.mean([metrics['mae'] for metrics in metrics_by_param.values()])
+        total_rmse = np.mean([metrics['rmse'] for metrics in metrics_by_param.values()])
         
-        # Дополнительные метрики
-        mae_value = np.mean(absolute_errors)
-        rmse_value = np.sqrt(np.mean(errors**2))
-        
-        # R² score
+        # R² score для каждого параметра
         from sklearn.metrics import r2_score
-        r2 = r2_score(y_true_original, y_pred)
+        r2_scores = {}
+        for idx, param_name in enumerate(target_columns):
+            r2_scores[param_name] = r2_score(y_true_original[:, idx], y_pred[:, idx])
         
         lstm_mape_results[cluster_id] = {
-            'mape': mape_value,
-            'mae': mae_value,
-            'rmse': rmse_value,
-            'r2': r2,
+            'metrics_by_param': metrics_by_param,
+            'total_mape': total_mape,
+            'total_mae': total_mae,
+            'total_rmse': total_rmse,
+            'r2_scores': r2_scores,
             'training_samples': len(X_train),
             'validation_samples': len(X_val),
             'test_samples': len(X_test)
         }
         
         print(f"\n  Результаты тестирования для кластера {cluster_id}:")
-        print(f"    MAPE: {mape_value:.2f}%")
-        print(f"    MAE: {mae_value:.6f}")
-        print(f"    RMSE: {rmse_value:.6f}")
-        print(f"    R²: {r2:.4f}")
+        for param_name in target_columns:
+            print(f"    {param_name}: MAPE={metrics_by_param[param_name]['mape']:.2f}%, "
+                  f"MAE={metrics_by_param[param_name]['mae']:.6f}, "
+                  f"R²={r2_scores[param_name]:.4f}")
+        print(f"    Средние: MAPE={total_mape:.2f}%, MAE={total_mae:.6f}, RMSE={total_rmse:.6f}")
         print(f"    Примеров: train={len(X_train)}, val={len(X_val)}, test={len(X_test)}")
         
-        # Визуализация результатов тестирования
-        plt.figure(figsize=(15, 5))
+        # Визуализация результатов тестирования для каждого параметра
+        fig, axes = plt.subplots(3, 2, figsize=(15, 12))
         
-        # График: Прогнозы vs Реальные значения
-        plt.subplot(1, 2, 1)
-        plt.plot(y_true_original.flatten(), label='Реальные', marker='o', markersize=5, alpha=0.7)
-        plt.plot(y_pred.flatten(), label='Прогнозы', marker='s', markersize=5, alpha=0.7)
-        plt.title(f'Кластер {cluster_id}: Прогнозы vs Реальные\n{best_segment_info["file_name"]}')
-        plt.xlabel('Пример')
-        plt.ylabel('MAR')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        for idx, param_name in enumerate(target_columns):
+            # График: Прогнозы vs Реальные значения
+            axes[idx, 0].plot(y_true_original[:, idx], label='Реальные', marker='o', markersize=3, alpha=0.7)
+            axes[idx, 0].plot(y_pred[:, idx], label='Прогнозы', marker='s', markersize=3, alpha=0.7)
+            axes[idx, 0].set_title(f'{param_name}: Прогнозы vs Реальные')
+            axes[idx, 0].set_xlabel('Пример')
+            axes[idx, 0].set_ylabel(param_name)
+            axes[idx, 0].legend()
+            axes[idx, 0].grid(True, alpha=0.3)
+            
+            # График: Ошибки
+            errors = y_pred[:, idx] - y_true_original[:, idx]
+            axes[idx, 1].bar(range(len(errors)), errors, 
+                            color=['red' if e > 0 else 'blue' for e in errors], 
+                            alpha=0.6)
+            axes[idx, 1].axhline(y=0, color='black', linestyle='-', linewidth=1)
+            axes[idx, 1].set_title(f'{param_name}: Ошибки прогноза')
+            axes[idx, 1].set_xlabel('Пример')
+            axes[idx, 1].set_ylabel('Ошибка')
+            axes[idx, 1].grid(True, alpha=0.3, axis='y')
         
-        # График: Процентные ошибки
-        plt.subplot(1, 2, 2)
-        plt.plot(safe_mape, marker='o', markersize=5, alpha=0.7, color='purple')
-        plt.axhline(y=np.mean(safe_mape), color='red', linestyle='--', linewidth=2,
-                   label=f'MAPE: {np.mean(safe_mape):.2f}%')
-        plt.title('Процентные ошибки (MAPE)')
-        plt.xlabel('Пример')
-        plt.ylabel('Ошибка (%)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        
+        plt.suptitle(f'Результаты тестирования LSTM (Кластер {cluster_id})\n{best_segment_info["file_name"][:50]}...', 
+                     fontsize=14, y=1.02)
         plt.tight_layout()
-        plt.savefig(f'improved_predictions_cluster_{cluster_id}.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'improved_predictions_cluster_{cluster_id}_3outputs.png', dpi=300, bbox_inches='tight')
         plt.close()
     
-    # Прогнозирование для одного сегмента каждого кластера
-    print(f"\n  Прогнозирование для выбранного сегмента кластера {cluster_id}...")
+    # Прогнозирование для одного сегмента каждого кластера (все 3 параметра)
+    print(f"\n  Прогнозирование для выбранного сегмента кластера {cluster_id} (все 3 параметра)...")
     
     # Используем тот же сегмент для прогнозирования
-    results_df, metrics = predict_for_single_segment(
+    results_df, metrics, predictions_array, actuals_array = predict_for_single_segment(
         cluster_id, processed_segment, model, X_scalers, y_scalers,
         feature_columns, target_columns, sequence_length=10
     )
     
     if metrics:
         print(f"    Прогнозы для сегмента: {best_segment_info['file_name']}")
-        print(f"    Количество прогнозов: {metrics['total_predictions']}")
-        print(f"    MAPE на всем сегменте: {metrics['mape']:.2f}%")
-        print(f"    MAE на всем сегменте: {metrics['mae']:.6f}")
+        print(f"    Количество прогнозов: {metrics['total']['total_predictions']}")
+        for param_name in target_columns:
+            print(f"    {param_name}: MAPE={metrics[param_name]['mape']:.2f}%, "
+                  f"MAE={metrics[param_name]['mae']:.6f}")
+        print(f"    Средние MAPE: {metrics['total']['avg_mape']:.2f}%")
         
         # Сохраняем прогнозы для этого кластера
         segment_predictions[cluster_id] = {
@@ -1230,32 +1259,35 @@ for cluster_id in range(optimal_k):
             'file_name': best_segment_info['file_name'],
             'predictions_df': results_df,
             'metrics': metrics,
-            'model_path': f'lstm_model_cluster_{cluster_id}_improved.keras'
+            'predictions_array': predictions_array,
+            'actuals_array': actuals_array,
+            'model_path': f'lstm_model_cluster_{cluster_id}_improved_3outputs.keras'
         }
         
-        # Визуализация прогнозов для всего сегмента
-        print(f"  Создание графика прогнозов для всего сегмента...")
-        mape_vis, mae_vis = visualize_segment_predictions(
+        # Визуализация прогнозов для всего сегмента (все 3 параметра)
+        print(f"  Создание графика прогнозов для всего сегмента (3 параметра)...")
+        total_mape, total_mae = visualize_segment_predictions(
             processed_segment.iloc[10:],  # Пропускаем первые 10 точек для последовательностей
-            results_df['predicted_mar'].values,
-            results_df['actual_mar'].values,
+            predictions_array,
+            actuals_array,
             cluster_id,
             best_segment_info['file_name'],
+            target_columns,
             sequence_length=10
         )
         
         # Сохраняем результаты прогнозирования в Excel
-        results_df.to_excel(f'segment_predictions_cluster_{cluster_id}.xlsx', index=False)
-        print(f"    Результаты прогнозирования сохранены в 'segment_predictions_cluster_{cluster_id}.xlsx'")
+        results_df.to_excel(f'segment_predictions_cluster_{cluster_id}_3outputs.xlsx', index=False)
+        print(f"    Результаты прогнозирования сохранены в 'segment_predictions_cluster_{cluster_id}_3outputs.xlsx'")
     
     print(f"Модель для кластера {cluster_id} обучена и сохранена")
 
 # ================================================
-# СОХРАНЕНИЕ УЛУЧШЕННЫХ РЕЗУЛЬТАТОВ
+# СОХРАНЕНИЕ УЛУЧШЕННЫХ РЕЗУЛЬТАТОВ (3 ВЫХОДА)
 # ================================================
 
 print("\n" + "="*60)
-print("СОХРАНЕНИЕ УЛУЧШЕННЫХ РЕЗУЛЬТАТОВ")
+print("СОХРАНЕНИЕ УЛУЧШЕННЫХ РЕЗУЛЬТАТОВ (3 ВЫХОДА)")
 print("="*60)
 
 # Сохраняем информацию о стратегиях обучения
@@ -1272,7 +1304,7 @@ if training_strategies:
             }
             strategies_df = pd.concat([strategies_df, pd.DataFrame([row])], ignore_index=True)
     
-    strategies_df.to_excel('training_strategies_summary.xlsx', index=False)
+    strategies_df.to_excel('training_strategies_summary_3outputs.xlsx', index=False)
     print("Информация о стратегиях обучения сохранена")
 
 # Сохраняем информацию о прогнозах для каждого кластера
@@ -1281,7 +1313,7 @@ if segment_predictions:
     
     all_predictions_summary = []
     
-    with pd.ExcelWriter('all_segment_predictions_summary.xlsx') as writer:
+    with pd.ExcelWriter('all_segment_predictions_summary_3outputs.xlsx') as writer:
         for cluster_id, pred_info in segment_predictions.items():
             # Сохраняем детальные прогнозы на отдельный лист
             sheet_name = f'Cluster_{cluster_id}'
@@ -1295,20 +1327,23 @@ if segment_predictions:
                 'Cluster_ID': cluster_id,
                 'File_Name': pred_info['file_name'],
                 'Segment_ID': pred_info['segment_id'],
-                'Total_Predictions': pred_info['metrics']['total_predictions'],
-                'MAPE_%': round(pred_info['metrics']['mape'], 2),
-                'MAE': round(pred_info['metrics']['mae'], 6),
-                'RMSE': round(pred_info['metrics'].get('rmse', 0), 6),
+                'Total_Predictions': pred_info['metrics']['total']['total_predictions'],
+                'left_ear_MAPE_%': round(pred_info['metrics']['left_ear']['mape'], 2),
+                'right_ear_MAPE_%': round(pred_info['metrics']['right_ear']['mape'], 2),
+                'mar_MAPE_%': round(pred_info['metrics']['mar']['mape'], 2),
+                'Avg_MAPE_%': round(pred_info['metrics']['total']['avg_mape'], 2),
+                'Avg_MAE': round(pred_info['metrics']['total']['avg_mae'], 6),
                 'Model_Path': pred_info['model_path']
             }
             all_predictions_summary.append(summary)
     
     # Сохраняем сводную таблицу
     summary_df = pd.DataFrame(all_predictions_summary)
-    summary_df.to_excel('predictions_summary.xlsx', index=False)
+    summary_df.to_excel('predictions_summary_3outputs.xlsx', index=False)
     
     print("Результаты прогнозирования сохранены:")
-    print(summary_df[['Cluster_ID', 'File_Name', 'Total_Predictions', 'MAPE_%', 'MAE']].to_string())
+    print(summary_df[['Cluster_ID', 'File_Name', 'Total_Predictions', 
+                     'left_ear_MAPE_%', 'right_ear_MAPE_%', 'mar_MAPE_%', 'Avg_MAPE_%']].to_string())
 
 # Сводная таблица результатов обучения
 if lstm_mape_results:
@@ -1323,102 +1358,121 @@ if lstm_mape_results:
             'Training_Samples': metrics.get('training_samples', 0),
             'Validation_Samples': metrics.get('validation_samples', 0),
             'Test_Samples': metrics.get('test_samples', 0),
-            'MAPE_%': round(metrics['mape'], 2),
-            'MAE': round(metrics['mae'], 6),
-            'RMSE': round(metrics['rmse'], 6),
-            'R2_Score': round(metrics.get('r2', 0), 4),
-            'Quality': 'Отличная' if metrics['mape'] < 10 else 
-                      'Хорошая' if metrics['mape'] < 20 else 
-                      'Удовлетворительная' if metrics['mape'] < 30 else 
+            'left_ear_MAPE_%': round(metrics['metrics_by_param']['left_ear']['mape'], 2),
+            'right_ear_MAPE_%': round(metrics['metrics_by_param']['right_ear']['mape'], 2),
+            'mar_MAPE_%': round(metrics['metrics_by_param']['mar']['mape'], 2),
+            'Avg_MAPE_%': round(metrics['total_mape'], 2),
+            'Avg_MAE': round(metrics['total_mae'], 6),
+            'Avg_RMSE': round(metrics['total_rmse'], 6),
+            'left_ear_R2': round(metrics['r2_scores']['left_ear'], 4),
+            'right_ear_R2': round(metrics['r2_scores']['right_ear'], 4),
+            'mar_R2': round(metrics['r2_scores']['mar'], 4),
+            'Quality': 'Отличная' if metrics['total_mape'] < 10 else 
+                      'Хорошая' if metrics['total_mape'] < 20 else 
+                      'Удовлетворительная' if metrics['total_mape'] < 30 else 
                       'Плохая'
         }
         final_summary.append(summary)
     
     final_summary_df = pd.DataFrame(final_summary)
-    final_summary_df.to_excel('improved_model_performance_summary.xlsx', index=False)
+    final_summary_df.to_excel('improved_model_performance_summary_3outputs.xlsx', index=False)
     
-    print("\nИтоговые результаты обучения:")
-    print(final_summary_df[['Cluster_ID', 'MAPE_%', 'MAE', 'R2_Score', 'Quality']].to_string())
+    print("\nИтоговые результаты обучения (3 выхода):")
+    print(final_summary_df[['Cluster_ID', 'left_ear_MAPE_%', 'right_ear_MAPE_%', 
+                           'mar_MAPE_%', 'Avg_MAPE_%', 'Quality']].to_string())
     
-    # Визуализация улучшений
-    plt.figure(figsize=(12, 8))
+    # Визуализация улучшений для каждого параметра
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     
     clusters = final_summary_df['Cluster_ID'].values
-    mape_values = final_summary_df['MAPE_%'].values
     
-    colors = ['green' if mape < 10 else 'orange' if mape < 20 else 'yellow' if mape < 30 else 'red' 
-              for mape in mape_values]
+    for idx, param_name in enumerate(['left_ear', 'right_ear', 'mar']):
+        mape_values = final_summary_df[f'{param_name}_MAPE_%'].values
+        
+        colors = ['green' if mape < 10 else 'orange' if mape < 20 else 'yellow' if mape < 30 else 'red' 
+                  for mape in mape_values]
+        
+        bars = axes[idx].bar(clusters, mape_values, color=colors, alpha=0.7, edgecolor='black')
+        
+        axes[idx].axhline(y=10, color='green', linestyle='--', alpha=0.5, label='Отличная (<10%)')
+        axes[idx].axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='Хорошая (<20%)')
+        axes[idx].axhline(y=30, color='red', linestyle='--', alpha=0.5, label='Приемлемая (<30%)')
+        
+        for i, (bar, mape) in enumerate(zip(bars, mape_values)):
+            axes[idx].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+                          f'{mape:.1f}%', ha='center', va='bottom', fontsize=9)
+        
+        axes[idx].set_xlabel('Кластер', fontsize=12)
+        axes[idx].set_ylabel('MAPE (%)', fontsize=12)
+        axes[idx].set_title(f'Точность прогнозирования: {param_name}', fontsize=14)
+        axes[idx].legend(loc='upper right')
+        axes[idx].grid(True, alpha=0.3, axis='y')
+        axes[idx].set_ylim(0, max(mape_values) * 1.2)
     
-    bars = plt.bar(clusters, mape_values, color=colors, alpha=0.7, edgecolor='black')
-    
-    plt.axhline(y=10, color='green', linestyle='--', alpha=0.5, label='Отличная точность (<10%)')
-    plt.axhline(y=20, color='orange', linestyle='--', alpha=0.5, label='Хорошая точность (<20%)')
-    plt.axhline(y=30, color='red', linestyle='--', alpha=0.5, label='Приемлемая точность (<30%)')
-    
-    for i, (bar, mape) in enumerate(zip(bars, mape_values)):
-        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
-                f'{mape:.1f}%', ha='center', va='bottom', fontsize=9)
-    
-    plt.xlabel('Кластер', fontsize=12)
-    plt.ylabel('MAPE (%)', fontsize=12)
-    plt.title('Улучшенные результаты прогнозирования по кластерам', fontsize=14, pad=20)
-    plt.legend(loc='upper right')
-    plt.grid(True, alpha=0.3, axis='y')
-    plt.ylim(0, max(mape_values) * 1.2)
-    
+    plt.suptitle('Улучшенные результаты прогнозирования по кластерам (3 параметра)', fontsize=16, y=1.05)
     plt.tight_layout()
-    plt.savefig('improved_performance_summary.png', dpi=300, bbox_inches='tight')
+    plt.savefig('improved_performance_summary_3outputs.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-# Создаем единый график со всеми прогнозами
-print("\nСоздание единого графика со всеми прогнозами...")
+# Создаем единый график со всеми прогнозами для всех параметров
+print("\nСоздание единого графика со всеми прогнозами (3 параметра)...")
 if segment_predictions:
     n_clusters = len(segment_predictions)
-    fig, axes = plt.subplots(n_clusters, 1, figsize=(15, 4 * n_clusters))
+    fig, axes = plt.subplots(n_clusters, 3, figsize=(20, 4 * n_clusters))
     
     if n_clusters == 1:
-        axes = [axes]
+        axes = np.array([axes]).reshape(1, 3)
     
     for idx, (cluster_id, pred_info) in enumerate(segment_predictions.items()):
-        predictions = pred_info['predictions_df']['predicted_mar'].values
-        actuals = pred_info['predictions_df']['actual_mar'].values
+        predictions = pred_info['predictions_array']
+        actuals = pred_info['actuals_array']
         
         time_indices = np.arange(len(predictions))
         
-        axes[idx].plot(time_indices, actuals, label='Фактические значения', 
-                      color='blue', alpha=0.7, linewidth=2)
-        axes[idx].plot(time_indices, predictions, label='Прогнозы LSTM', 
-                      color='red', alpha=0.7, linewidth=2, linestyle='--')
-        
-        # Информация о качестве
-        mape = pred_info['metrics']['mape']
-        mae = pred_info['metrics']['mae']
-        
-        axes[idx].text(0.02, 0.95, f'Кластер {cluster_id}\n'
-                     f'MAPE: {mape:.2f}%\nMAE: {mae:.4f}', 
-                     transform=axes[idx].transAxes,
-                     fontsize=9, verticalalignment='top',
-                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        axes[idx].set_xlabel('Временной индекс', fontsize=10)
-        axes[idx].set_ylabel('MAR', fontsize=10)
-        axes[idx].set_title(f'Прогнозы для кластера {cluster_id}: {pred_info["file_name"][:40]}...', 
-                           fontsize=11)
-        axes[idx].legend(loc='best', fontsize=9)
-        axes[idx].grid(True, alpha=0.3)
+        # Для каждого параметра создаем свой график
+        for param_idx, param_name in enumerate(target_columns):
+            actual_values = actuals[:, param_idx]
+            predicted_values = predictions[:, param_idx]
+            
+            axes[idx, param_idx].plot(time_indices, actual_values, label='Фактические', 
+                                     color='blue', alpha=0.7, linewidth=1.5)
+            axes[idx, param_idx].plot(time_indices, predicted_values, label='Прогнозы', 
+                                     color='red', alpha=0.7, linewidth=1.5, linestyle='--')
+            
+            # Расчет ошибок
+            errors = predicted_values - actual_values
+            mape = np.mean(np.abs(errors / (actual_values + 1e-10))) * 100
+            
+            axes[idx, param_idx].text(0.02, 0.95, f'MAPE: {mape:.2f}%', 
+                                     transform=axes[idx, param_idx].transAxes,
+                                     fontsize=9, verticalalignment='top',
+                                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+            
+            axes[idx, param_idx].set_xlabel('Временной индекс', fontsize=9)
+            axes[idx, param_idx].set_ylabel(param_name, fontsize=9)
+            
+            if param_idx == 0:
+                axes[idx, param_idx].set_title(f'Кластер {cluster_id}\n{param_name}', fontsize=10)
+            else:
+                axes[idx, param_idx].set_title(param_name, fontsize=10)
+            
+            axes[idx, param_idx].legend(loc='best', fontsize=8)
+            axes[idx, param_idx].grid(True, alpha=0.3)
     
+    plt.suptitle('Прогнозы LSTM для всех кластеров и параметров', fontsize=16, y=1.02)
     plt.tight_layout()
-    plt.savefig('all_segment_predictions.png', dpi=300, bbox_inches='tight')
+    plt.savefig('all_segment_predictions_3outputs.png', dpi=300, bbox_inches='tight')
     plt.close()
-    print("Единый график со всеми прогнозами сохранен как 'all_segment_predictions.png'")
+    print("Единый график со всеми прогнозами сохранен как 'all_segment_predictions_3outputs.png'")
 
 print("\n" + "="*60)
-print("УЛУЧШЕНИЯ ВНЕСЕНЫ:")
+print("ОСНОВНЫЕ ИЗМЕНЕНИЯ:")
 print("="*60)
-print("1. Убраны графики корреляции, QQ-plot, распределение ошибок")
-print("2. Добавлен отдельный график для каждого сегмента с прогнозами")
-print("3. Увеличена обучающая выборка, в тестовой осталось 30 записей")
-print("4. Добавлено прогнозирование по одному сегменту каждого кластера")
-print("5. Результаты обучения и прогнозирования сохранены в отдельные файлы")
-print("6. Все модели сохранены в формате .keras")
-print("7. Создан единый график со всеми прогнозами")
+print("1. Модель теперь принимает на вход все 3 параметра (left_ear, right_ear, mar)")
+print("2. Модель теперь прогнозирует все 3 параметра одновременно")
+print("3. Архитектура LSTM адаптирована для многомерного выхода")
+print("4. Метрики качества вычисляются для каждого параметра отдельно")
+print("5. Визуализации создаются для всех 3 параметров")
+print("6. Все модели сохранены с суффиксом '_3outputs'")
+print("7. Результаты сохраняются в отдельных файлах Excel для каждого кластера")
+print("8. Созданы сводные таблицы по всем параметрам")
