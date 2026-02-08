@@ -556,7 +556,7 @@ else:
 # ================================================
 
 def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequence_length=10, 
-                               validation_split=0.2, test_split=0.2):
+                               validation_split=0.10, test_split=0.10):
     """
     Улучшенная подготовка данных для обучения LSTM с нормализацией и разделением
     """
@@ -578,7 +578,7 @@ def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequ
         X.append(X_data[i:i+sequence_length])
         y.append(y_data[i+sequence_length])
     
-    if len(X) < 50:  # Минимальное количество последовательностей
+    if len(X) < 40:  # Минимальное количество последовательностей
         print(f"Слишком мало последовательностей: {len(X)}")
         return None, None, None, None, None, None
     
