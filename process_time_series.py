@@ -527,7 +527,7 @@ else:
 # УЛУЧШЕННАЯ ПОДГОТОВКА ДАННЫХ ДЛЯ LSTM (ВСЕ 3 ПАРАМЕТРА)
 # ================================================
 
-def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequence_length=10, 
+def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequence_length=30, 
                                validation_split=0.10, test_samples=30):
     """
     Улучшенная подготовка данных для обучения LSTM с нормализацией и разделением
