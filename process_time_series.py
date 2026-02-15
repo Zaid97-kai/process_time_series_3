@@ -1,16 +1,28 @@
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score, r2_score
+from sklearn.mixture import GaussianMixture
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional, BatchNormalization
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
+from tensorflow.keras.regularizers import l2
 import warnings
 warnings.filterwarnings('ignore')
 import os
 import tempfile
+import joblib
+
+# ================================================
+# ЗАГРУЗКА И ПРЕДОБРАБОТКА ДАННЫХ
+# ================================================
 
 # Загрузка данных
 df = pd.read_excel('Dataset.xlsx')
@@ -34,6 +46,7 @@ target_columns = ['left_ear', 'right_ear', 'mar']   # Все три параме
 # ================================================
 # ФУНКЦИЯ СГЛАЖИВАНИЯ ДАННЫХ
 # ================================================
+
 def smooth_data(df, window_size=3, method='moving_average'):
     """
     Сглаживание данных для уменьшения шума и скачков
@@ -457,8 +470,6 @@ if len(X) > 1 and X.shape[0] > 1:
     
     # Визуализация кластеров с помощью PCA (2D проекция)
     try:
-        from sklearn.decomposition import PCA
-        
         if X_scaled.shape[1] > 2:
             pca = PCA(n_components=2)
             X_pca = pca.fit_transform(X_scaled)
@@ -538,7 +549,7 @@ def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequ
     if len(segment_df) < min_required:
         print(f"Предупреждение: сегмент содержит только {len(segment_df)} точек, "
               f"требуется минимум {min_required}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
     
     # Извлекаем только нужные колонки
     X_data = segment_df[feature_columns].values
@@ -553,7 +564,7 @@ def prepare_improved_lstm_data(segment_df, feature_columns, target_columns, sequ
     
     if len(X) < 50:  # Минимальное количество последовательностей
         print(f"Слишком мало последовательностей: {len(X)}")
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None
     
     X = np.array(X)
     y = np.array(y)
@@ -650,11 +661,10 @@ def create_improved_lstm_model(input_shape, output_shape, dropout_rate=0.3,
     """
     Создает улучшенную модель LSTM с регуляризацией для прогнозирования 3 параметров
     """
-    from tensorflow.keras.regularizers import l2
     
     model = Sequential([
         # Первый LSTM слой с регуляризацией
-        LSTM(128, activation='tanh', return_sequences=True,
+        LSTM(64, activation='tanh', return_sequences=True,
              input_shape=input_shape,
              kernel_regularizer=l2(l2_reg),
              recurrent_regularizer=l2(l2_reg),
@@ -664,7 +674,7 @@ def create_improved_lstm_model(input_shape, output_shape, dropout_rate=0.3,
         Dropout(dropout_rate),
         
         # Второй LSTM слой
-        LSTM(64, activation='tanh', return_sequences=False,
+        LSTM(32, activation='tanh', return_sequences=False,
              kernel_regularizer=l2(l2_reg),
              recurrent_regularizer=l2(l2_reg),
              dropout=dropout_rate,
@@ -673,10 +683,10 @@ def create_improved_lstm_model(input_shape, output_shape, dropout_rate=0.3,
         Dropout(dropout_rate),
         
         # Полносвязные слои
-        Dense(64, activation='relu', kernel_regularizer=l2(l2_reg)),
+        Dense(32, activation='relu', kernel_regularizer=l2(l2_reg)),
         Dropout(dropout_rate),
         
-        Dense(32, activation='relu', kernel_regularizer=l2(l2_reg)),
+        Dense(16, activation='relu', kernel_regularizer=l2(l2_reg)),
         Dropout(dropout_rate),
         
         # Выходной слой с 3 нейронами (left_ear, right_ear, mar)
@@ -1465,14 +1475,1414 @@ if segment_predictions:
     plt.close()
     print("Единый график со всеми прогнозами сохранен как 'all_segment_predictions_3outputs.png'")
 
+# ================================================
+# ФУНКЦИИ ДЛЯ ВИЗУАЛИЗАЦИИ РЕЗУЛЬТАТОВ ГИБРИДНОГО ПОДХОДА
+# ================================================
+
+def visualize_hybrid_predictions(cluster_id, file_name, predictions, actuals, 
+                                 type_usage, feature_names, save_path=None):
+    """
+    Визуализация прогнозов гибридного подхода с отображением используемых типов паттернов
+    """
+    fig = plt.figure(figsize=(20, 14))
+    
+    # Создаем сетку для графиков
+    gs = fig.add_gridspec(4, 3, hspace=0.3, wspace=0.3)
+    
+    time_indices = np.arange(len(predictions))
+    
+    # Цвета для разных типов паттернов
+    unique_types = np.unique(type_usage)
+    colors = plt.cm.Set1(np.linspace(0, 1, len(unique_types)))
+    type_colors = {t: colors[i] for i, t in enumerate(unique_types)}
+    
+    # 1-3. Графики для каждого параметра
+    for idx, param_name in enumerate(feature_names):
+        ax = fig.add_subplot(gs[idx, :2])
+        
+        actual_values = actuals[:, idx]
+        predicted_values = predictions[:, idx]
+        
+        # Основной график
+        ax.plot(time_indices, actual_values, label='Фактические', 
+                color='blue', alpha=0.7, linewidth=2)
+        ax.plot(time_indices, predicted_values, label='Прогнозы (гибрид)', 
+                color='red', alpha=0.7, linewidth=2, linestyle='--')
+        
+        # Закрашиваем области по типам паттернов
+        for t in unique_types:
+            type_mask = type_usage == t
+            if np.any(type_mask):
+                # Находим границы непрерывных участков
+                boundaries = np.where(np.diff(type_mask.astype(int)) != 0)[0] + 1
+                starts = np.concatenate([[0], boundaries])
+                ends = np.concatenate([boundaries, [len(type_mask)]])
+                
+                for start, end in zip(starts, ends):
+                    if type_mask[start]:
+                        ax.axvspan(time_indices[start], time_indices[end-1], 
+                                 alpha=0.2, color=type_colors[t], 
+                                 label=f'Тип {t}' if start == 0 else "")
+        
+        # Расчет ошибок
+        errors = predicted_values - actual_values
+        mape = np.mean(np.abs(errors / (actual_values + 1e-10))) * 100
+        mae = np.mean(np.abs(errors))
+        rmse = np.sqrt(np.mean(errors**2))
+        
+        # Добавляем информацию о качестве
+        textstr = f'{param_name}\nMAPE: {mape:.2f}%\nMAE: {mae:.4f}\nRMSE: {rmse:.4f}'
+        ax.text(0.02, 0.95, textstr, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        ax.set_xlabel('Временной индекс', fontsize=10)
+        ax.set_ylabel(param_name, fontsize=10)
+        ax.set_title(f'{param_name}: прогнозы гибридной модели', fontsize=12)
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.3)
+    
+    # 4. График распределения типов паттернов
+    ax_types = fig.add_subplot(gs[3, :])
+    
+    # Строим столбчатую диаграмму использования типов
+    type_counts = pd.Series(type_usage).value_counts().sort_index()
+    bars = ax_types.bar(type_counts.index, type_counts.values, 
+                        color=[type_colors[t] for t in type_counts.index], 
+                        alpha=0.7, edgecolor='black')
+    
+    # Добавляем подписи
+    for bar in bars:
+        height = bar.get_height()
+        ax_types.text(bar.get_x() + bar.get_width()/2., height,
+                     f'{int(height)}', ha='center', va='bottom')
+    
+    ax_types.set_xlabel('Тип паттерна', fontsize=12)
+    ax_types.set_ylabel('Количество использований', fontsize=12)
+    ax_types.set_title('Распределение типов паттернов при прогнозировании', fontsize=14)
+    ax_types.grid(True, alpha=0.3, axis='y')
+    
+    # Общий заголовок
+    plt.suptitle(f'Гибридное прогнозирование: {file_name}\nКластер {cluster_id}', 
+                 fontsize=16, y=1.02)
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+
+def visualize_types_comparison(cluster_id, type_models_results, feature_names, pattern_stats_df=None, save_path=None):
+    """
+    Визуализация сравнения моделей для разных типов паттернов
+    """
+    n_types = len(type_models_results)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    axes = axes.flatten()
+    
+    # 1. Сравнение MAPE по типам
+    ax = axes[0]
+    types = list(type_models_results.keys())
+    mape_values = [type_models_results[t]['avg_mape'] for t in types]
+    
+    colors = ['green' if m < 10 else 'orange' if m < 15 else 'red' for m in mape_values]
+    bars = ax.bar(types, mape_values, color=colors, alpha=0.7, edgecolor='black')
+    
+    for bar, mape in zip(bars, mape_values):
+        ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.5,
+               f'{mape:.1f}%', ha='center', va='bottom', fontsize=9)
+    
+    ax.axhline(y=10, color='green', linestyle='--', alpha=0.5, label='Отлично (<10%)')
+    ax.axhline(y=15, color='orange', linestyle='--', alpha=0.5, label='Хорошо (<15%)')
+    ax.set_xlabel('Тип паттерна')
+    ax.set_ylabel('MAPE (%)')
+    ax.set_title('Точность моделей по типам паттернов')
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 2. Сравнение по параметрам для каждого типа
+    ax = axes[1]
+    x = np.arange(len(types))
+    width = 0.25
+    
+    for idx, param in enumerate(feature_names):
+        param_values = [type_models_results[t]['metrics'][param]['mape'] for t in types]
+        ax.bar(x + idx*width, param_values, width, label=param, alpha=0.7)
+    
+    ax.set_xlabel('Тип паттерна')
+    ax.set_ylabel('MAPE (%)')
+    ax.set_title('MAPE по параметрам для каждого типа')
+    ax.set_xticks(x + width)
+    ax.set_xticklabels([f'Тип {t}' for t in types])
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 3. Количество окон по типам
+    ax = axes[2]
+    n_windows = [type_models_results[t]['n_windows'] for t in types]
+    bars = ax.bar(types, n_windows, color='skyblue', alpha=0.7, edgecolor='black')
+    
+    for bar, n in zip(bars, n_windows):
+        ax.text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.5,
+               str(n), ha='center', va='bottom')
+    
+    ax.set_xlabel('Тип паттерна')
+    ax.set_ylabel('Количество окон')
+    ax.set_title('Объем данных по типам паттернов')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 4. Распределение средних значений по типам (если есть pattern_stats_df)
+    ax = axes[3]
+    
+    if pattern_stats_df is not None and 'pattern_type' in pattern_stats_df.columns:
+        # Собираем средние значения для каждого типа
+        type_means = {}
+        for t in types:
+            type_windows = pattern_stats_df[pattern_stats_df['pattern_type'] == t]
+            if len(type_windows) > 0:
+                type_means[t] = {
+                    'left_ear': type_windows['left_ear_mean'].mean(),
+                    'right_ear': type_windows['right_ear_mean'].mean(),
+                    'mar': type_windows['mar_mean'].mean()
+                }
+        
+        if type_means:
+            x = np.arange(len(types))
+            width = 0.25
+            
+            for idx, param in enumerate(feature_names):
+                values = [type_means[t][param] for t in types if t in type_means]
+                ax.bar(x[:len(values)] + idx*width, values, width, label=param, alpha=0.7)
+            
+            ax.set_xlabel('Тип паттерна')
+            ax.set_ylabel('Среднее значение')
+            ax.set_title('Средние значения параметров по типам')
+            ax.set_xticks(x + width)
+            ax.set_xticklabels([f'Тип {t}' for t in types])
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
+    else:
+        ax.text(0.5, 0.5, 'Нет данных о средних значениях', 
+               ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Средние значения параметров по типам')
+    
+    # 5. Распределение стандартных отклонений
+    ax = axes[4]
+    
+    if pattern_stats_df is not None and 'pattern_type' in pattern_stats_df.columns:
+        type_stds = {}
+        for t in types:
+            type_windows = pattern_stats_df[pattern_stats_df['pattern_type'] == t]
+            if len(type_windows) > 0:
+                type_stds[t] = {
+                    'left_ear': type_windows['left_ear_std'].mean(),
+                    'right_ear': type_windows['right_ear_std'].mean(),
+                    'mar': type_windows['mar_std'].mean()
+                }
+        
+        if type_stds:
+            x = np.arange(len(types))
+            width = 0.25
+            
+            for idx, param in enumerate(feature_names):
+                values = [type_stds[t][param] for t in types if t in type_stds]
+                ax.bar(x[:len(values)] + idx*width, values, width, label=param, alpha=0.7)
+            
+            ax.set_xlabel('Тип паттерна')
+            ax.set_ylabel('Стандартное отклонение')
+            ax.set_title('Вариативность параметров по типам')
+            ax.set_xticks(x + width)
+            ax.set_xticklabels([f'Тип {t}' for t in types])
+            ax.legend()
+            ax.grid(True, alpha=0.3, axis='y')
+    else:
+        ax.text(0.5, 0.5, 'Нет данных о стандартных отклонениях', 
+               ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Вариативность параметров по типам')
+    
+    # 6. Сводная информация
+    ax = axes[5]
+    ax.axis('off')
+    
+    # Создаем таблицу с результатами
+    table_data = []
+    for t in types:
+        row = [
+            f'Тип {t}',
+            f"{type_models_results[t]['avg_mape']:.1f}%",
+            f"{type_models_results[t]['metrics']['left_ear']['mape']:.1f}%",
+            f"{type_models_results[t]['metrics']['right_ear']['mape']:.1f}%",
+            f"{type_models_results[t]['metrics']['mar']['mape']:.1f}%",
+            str(type_models_results[t]['n_windows'])
+        ]
+        table_data.append(row)
+    
+    columns = ['Тип', 'Ср.MAPE', 'L_Ear', 'R_Ear', 'MAR', 'Окон']
+    table = ax.table(cellText=table_data, colLabels=columns, 
+                    cellLoc='center', loc='center',
+                    colWidths=[0.12, 0.12, 0.12, 0.12, 0.12, 0.12])
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.5)
+    
+    # Раскрашиваем строки
+    for i, row in enumerate(table_data):
+        mape = float(row[1].replace('%', ''))
+        if mape < 10:
+            color = '#c8e6c9'  # светло-зеленый
+        elif mape < 15:
+            color = '#fff9c4'  # светло-желтый
+        else:
+            color = '#ffcdd2'  # светло-красный
+        
+        for j in range(len(columns)):
+            table[(i+1, j)].set_facecolor(color)
+    
+    ax.set_title('Сводная информация по типам паттернов', fontsize=14, pad=20)
+    
+    plt.suptitle(f'Анализ моделей для разных типов паттернов\nКластер {cluster_id}', 
+                 fontsize=16, y=1.02)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+
+def visualize_hybrid_comparison(cluster_id, original_results, hybrid_results, 
+                               file_test_results, save_path=None):
+    """
+    Визуализация сравнения исходного и гибридного подходов
+    """
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    axes = axes.flatten()
+    
+    # 1. Сравнение MAPE по файлам
+    ax = axes[0]
+    
+    files = [r['file_name'] for r in file_test_results]
+    hybrid_mape = [r['avg_mape'] for r in file_test_results]
+    
+    # Для исходной модели берем значения из lstm_mape_results
+    original_mape_by_file = []
+    for r in file_test_results:
+        file_name = r['file_name']
+        # Ищем соответствующий файл в исходных результатах
+        found = False
+        for seg_id, info in cluster_segment_samples.items():
+            if info['file_name'] == file_name and info['cluster'] == cluster_id:
+                # Берем MAPE из соответствующего кластера
+                if cluster_id in lstm_mape_results:
+                    original_mape_by_file.append(lstm_mape_results[cluster_id]['total_mape'])
+                else:
+                    original_mape_by_file.append(hybrid_mape[-1])  # fallback
+                found = True
+                break
+        if not found:
+            original_mape_by_file.append(hybrid_mape[-1])  # fallback
+    
+    x = np.arange(len(files))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, original_mape_by_file, width, 
+                   label='Исходная модель', color='red', alpha=0.7)
+    bars2 = ax.bar(x + width/2, hybrid_mape, width, 
+                   label='Гибридный подход', color='green', alpha=0.7)
+    
+    # Добавляем значения
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.1f}%',
+                       xy=(bar.get_x() + bar.get_width()/2, height),
+                       xytext=(0, 3), textcoords="offset points",
+                       ha='center', va='bottom', fontsize=8)
+    
+    ax.set_xlabel('Файл')
+    ax.set_ylabel('MAPE (%)')
+    ax.set_title('Сравнение точности по файлам')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'Файл {i+1}' for i in range(len(files))], rotation=45)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 2. Радарная диаграмма для каждого параметра
+    ax = axes[1]
+    
+    # Средние значения по всем файлам
+    avg_left = np.mean([r['left_ear_mape'] for r in file_test_results])
+    avg_right = np.mean([r['right_ear_mape'] for r in file_test_results])
+    avg_mar = np.mean([r['mar_mape'] for r in file_test_results])
+    
+    # Для исходной модели (если есть данные по параметрам)
+    if cluster_id in lstm_mape_results:
+        orig_left = lstm_mape_results[cluster_id]['metrics_by_param']['left_ear']['mape']
+        orig_right = lstm_mape_results[cluster_id]['metrics_by_param']['right_ear']['mape']
+        orig_mar = lstm_mape_results[cluster_id]['metrics_by_param']['mar']['mape']
+    else:
+        orig_left = orig_right = orig_mar = avg_left
+    
+    categories = ['left_ear', 'right_ear', 'mar']
+    N = len(categories)
+    
+    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+    angles += angles[:1]
+    
+    # Данные для радара
+    orig_values = [orig_left, orig_right, orig_mar]
+    orig_values += orig_values[:1]
+    
+    hybrid_values = [avg_left, avg_right, avg_mar]
+    hybrid_values += hybrid_values[:1]
+    
+    ax.plot(angles, orig_values, 'o-', linewidth=2, label='Исходная', color='red')
+    ax.fill(angles, orig_values, alpha=0.25, color='red')
+    ax.plot(angles, hybrid_values, 'o-', linewidth=2, label='Гибридная', color='green')
+    ax.fill(angles, hybrid_values, alpha=0.25, color='green')
+    
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(categories)
+    ax.set_ylim(0, max(max(orig_values), max(hybrid_values)) * 1.2)
+    ax.set_title('Сравнение точности по параметрам')
+    ax.legend(loc='upper right')
+    ax.grid(True)
+    
+    # 3. Распределение улучшений
+    ax = axes[2]
+    
+    improvements = []
+    for i, r in enumerate(file_test_results):
+        if i < len(original_mape_by_file):
+            imp = ((original_mape_by_file[i] - r['avg_mape']) / original_mape_by_file[i]) * 100
+            improvements.append(imp)
+    
+    colors = ['green' if imp > 0 else 'red' for imp in improvements]
+    bars = ax.bar(range(len(improvements)), improvements, color=colors, alpha=0.7)
+    
+    for bar, imp in zip(bars, improvements):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + (2 if imp > 0 else -5),
+               f'{imp:.1f}%', ha='center', va='bottom' if imp > 0 else 'top', fontsize=9)
+    
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=1)
+    ax.set_xlabel('Файл')
+    ax.set_ylabel('Улучшение (%)')
+    ax.set_title('Улучшение/ухудшение по файлам')
+    ax.set_xticks(range(len(improvements)))
+    ax.set_xticklabels([f'Файл {i+1}' for i in range(len(improvements))])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 4. Сравнение по длительности прогноза
+    ax = axes[3]
+    
+    n_predictions = [r['n_predictions'] for r in file_test_results]
+    ax.bar(range(len(n_predictions)), n_predictions, color='skyblue', alpha=0.7)
+    
+    for i, n in enumerate(n_predictions):
+        ax.text(i, n + 5, str(n), ha='center', va='bottom')
+    
+    ax.set_xlabel('Файл')
+    ax.set_ylabel('Количество прогнозов')
+    ax.set_title('Количество прогнозов по файлам')
+    ax.set_xticks(range(len(n_predictions)))
+    ax.set_xticklabels([f'Файл {i+1}' for i in range(len(n_predictions))])
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 5. Общее сравнение
+    ax = axes[4]
+    
+    avg_original = np.mean(original_mape_by_file)
+    avg_hybrid = np.mean(hybrid_mape)
+    
+    bars = ax.bar(['Исходная', 'Гибридная'], [avg_original, avg_hybrid], 
+                  color=['red', 'green'], alpha=0.7)
+    
+    for bar, val in zip(bars, [avg_original, avg_hybrid]):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1,
+               f'{val:.2f}%', ha='center', va='bottom', fontsize=11)
+    
+    ax.set_ylabel('Средний MAPE (%)')
+    ax.set_title('Общее сравнение подходов')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 6. Текст с итогами
+    ax = axes[5]
+    ax.axis('off')
+    
+    improvement_total = ((avg_original - avg_hybrid) / avg_original) * 100 if avg_original > 0 else 0
+    
+    # Получаем распределение типов из первого файла для примера
+    type_dist_str = ""
+    if len(file_test_results) > 0 and 'type_distribution' in file_test_results[0]:
+        type_dist = eval(file_test_results[0]['type_distribution'])
+        type_dist_str = f"Пример распределения типов: {type_dist}"
+    
+    textstr = f"""
+    ИТОГИ УЛУЧШЕНИЯ КЛАСТЕРА {cluster_id}
+    
+    Количество файлов: {len(file_test_results)}
+    Исходная модель (среднее): {avg_original:.2f}%
+    Гибридный подход (среднее): {avg_hybrid:.2f}%
+    
+    Общее улучшение: {improvement_total:.1f}%
+    
+    Лучший результат:
+    Файл: {file_test_results[np.argmin(hybrid_mape)]['file_name']}
+    MAPE: {np.min(hybrid_mape):.2f}%
+    
+    Худший результат:
+    Файл: {file_test_results[np.argmax(hybrid_mape)]['file_name']}
+    MAPE: {np.max(hybrid_mape):.2f}%
+    
+    {type_dist_str}
+    """
+    
+    ax.text(0.1, 0.5, textstr, transform=ax.transAxes, fontsize=11,
+            verticalalignment='center', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='#f0f0f0', alpha=0.8))
+    
+    plt.suptitle(f'Сравнение исходного и гибридного подходов\nКластер {cluster_id}', 
+                 fontsize=16, y=1.02)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
+
+def visualize_all_hybrid_results(hybrid_results, lstm_mape_results, features_df):
+    """
+    Финальная визуализация всех результатов гибридного улучшения
+    """
+    if not hybrid_results:
+        print("Нет результатов для визуализации")
+        return
+    
+    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+    axes = axes.flatten()
+    
+    # 1. Сравнение MAPE по кластерам
+    ax = axes[0]
+    
+    clusters = list(hybrid_results.keys())
+    original_mape = [hybrid_results[c]['original_mape'] for c in clusters]
+    hybrid_mape = [hybrid_results[c]['avg_mape_on_files'] for c in clusters]
+    
+    x = np.arange(len(clusters))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, original_mape, width, label='Исходная', color='red', alpha=0.7)
+    bars2 = ax.bar(x + width/2, hybrid_mape, width, label='Гибридная', color='green', alpha=0.7)
+    
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.1f}%',
+                       xy=(bar.get_x() + bar.get_width()/2, height),
+                       xytext=(0, 3), textcoords="offset points",
+                       ha='center', va='bottom', fontsize=9)
+    
+    ax.set_xlabel('Кластер')
+    ax.set_ylabel('MAPE (%)')
+    ax.set_title('Сравнение точности по кластерам')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'Кластер {c}' for c in clusters])
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 2. Улучшение по кластерам
+    ax = axes[1]
+    
+    improvements = [hybrid_results[c]['improvement_percent'] for c in clusters]
+    colors = ['green' if imp > 0 else 'red' for imp in improvements]
+    bars = ax.bar(clusters, improvements, color=colors, alpha=0.7)
+    
+    for bar, imp in zip(bars, improvements):
+        ax.annotate(f'{imp:.1f}%',
+                   xy=(bar.get_x() + bar.get_width()/2, bar.get_height()),
+                   xytext=(0, 5 if imp > 0 else -15),
+                   textcoords="offset points",
+                   ha='center', va='bottom' if imp > 0 else 'top',
+                   fontsize=10, fontweight='bold')
+    
+    ax.axhline(y=0, color='black', linestyle='-', linewidth=1)
+    ax.set_xlabel('Кластер')
+    ax.set_ylabel('Улучшение (%)')
+    ax.set_title('Улучшение/ухудшение по кластерам')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 3. Количество типов паттернов
+    ax = axes[2]
+    
+    n_types = [hybrid_results[c]['n_pattern_types'] for c in clusters]
+    bars = ax.bar(clusters, n_types, color='skyblue', alpha=0.7)
+    
+    for bar, n in zip(bars, n_types):
+        ax.annotate(str(n),
+                   xy=(bar.get_x() + bar.get_width()/2, bar.get_height()),
+                   xytext=(0, 3), textcoords="offset points",
+                   ha='center', va='bottom')
+    
+    ax.set_xlabel('Кластер')
+    ax.set_ylabel('Количество типов')
+    ax.set_title('Количество типов паттернов по кластерам')
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # 4. Точность классификатора
+    ax = axes[3]
+    
+    if 'classifier_accuracy' in hybrid_results[list(hybrid_results.keys())[0]]:
+        accuracies = [hybrid_results[c]['classifier_accuracy'] for c in clusters]
+        bars = ax.bar(clusters, accuracies, color='orange', alpha=0.7)
+        
+        for bar, acc in zip(bars, accuracies):
+            ax.annotate(f'{acc:.3f}',
+                       xy=(bar.get_x() + bar.get_width()/2, bar.get_height()),
+                       xytext=(0, 3), textcoords="offset points",
+                       ha='center', va='bottom')
+        
+        ax.set_xlabel('Кластер')
+        ax.set_ylabel('Точность')
+        ax.set_title('Точность классификатора паттернов')
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.3, axis='y')
+    
+    # 5. Радар успешности
+    ax = axes[4]
+    
+    # Нормализуем данные для радара
+    max_original = max(original_mape) if original_mape else 1
+    max_hybrid = max(hybrid_mape) if hybrid_mape else 1
+    
+    # Инвертируем, чтобы меньше = лучше
+    orig_norm = [1 - (m / max_original) for m in original_mape]
+    hybrid_norm = [1 - (m / max_hybrid) for m in hybrid_mape]
+    
+    angles = [n / float(len(clusters)) * 2 * np.pi for n in range(len(clusters))]
+    angles += angles[:1]
+    
+    orig_norm += orig_norm[:1]
+    hybrid_norm += hybrid_norm[:1]
+    
+    ax.plot(angles, orig_norm, 'o-', linewidth=2, label='Исходная', color='red')
+    ax.fill(angles, orig_norm, alpha=0.25, color='red')
+    ax.plot(angles, hybrid_norm, 'o-', linewidth=2, label='Гибридная', color='green')
+    ax.fill(angles, hybrid_norm, alpha=0.25, color='green')
+    
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels([f'Кл{c}' for c in clusters])
+    ax.set_ylim(0, 1)
+    ax.set_title('Относительная эффективность (выше = лучше)')
+    ax.legend(loc='upper right')
+    ax.grid(True)
+    
+    # 6. Сводная таблица
+    ax = axes[5]
+    ax.axis('off')
+    
+    table_data = []
+    for c in clusters:
+        row = [
+            f'Кл{c}',
+            f"{hybrid_results[c]['original_mape']:.1f}%",
+            f"{hybrid_results[c]['avg_mape_on_files']:.1f}%",
+            f"{hybrid_results[c]['improvement_percent']:.1f}%",
+            str(hybrid_results[c]['n_pattern_types']),
+            str(hybrid_results[c]['n_windows_total']),
+            hybrid_results[c]['status']
+        ]
+        table_data.append(row)
+    
+    columns = ['Кластер', 'Исх.MAPE', 'Гибр.MAPE', 'Улучш', 'Типов', 'Окон', 'Статус']
+    table = ax.table(cellText=table_data, colLabels=columns, 
+                    cellLoc='center', loc='center',
+                    colWidths=[0.1, 0.12, 0.12, 0.1, 0.08, 0.08, 0.15])
+    
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.5)
+    
+    # Раскрашиваем строки по статусу
+    for i, row in enumerate(table_data):
+        if row[-1] == 'Улучшен':
+            color = '#c8e6c9'  # зеленый
+        else:
+            color = '#ffcdd2'  # красный
+        
+        for j in range(len(columns)):
+            table[(i+1, j)].set_facecolor(color)
+    
+    plt.suptitle('ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ ГИБРИДНОГО УЛУЧШЕНИЯ', 
+                 fontsize=18, y=1.02, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig('all_hybrid_results_summary.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print("\nФинальная визуализация сохранена как 'all_hybrid_results_summary.png'")
+
+# ================================================
+# ГИБРИДНЫЙ ПОДХОД: КАСКАДНАЯ КЛАССИФИКАЦИЯ + СПЕЦИАЛИЗИРОВАННЫЕ МОДЕЛИ
+# ================================================
+
+def hybrid_cluster_improvement_v4(cluster_id, segments, features_df,
+                                 feature_columns=['left_ear', 'right_ear', 'mar'],
+                                 target_columns=['left_ear', 'right_ear', 'mar']):
+    """
+    Гибридный подход:
+    1. Обучаем классификатор для определения типа паттерна в реальном времени
+    2. Для каждого типа паттерна - своя специализированная модель
+    3. На тестировании: сначала определяем тип, затем применяем соответствующую модель
+    """
+    
+    print(f"\n{'='*60}")
+    print(f"ГИБРИДНОЕ УЛУЧШЕНИЕ КЛАСТЕРА {cluster_id}")
+    print(f"{'='*60}")
+    
+    # Получаем все файлы кластера
+    cluster_segment_ids = features_df[features_df['cluster'] == cluster_id]['segment_id'].values
+    cluster_segment_ids = [int(id) - 1 for id in cluster_segment_ids]
+    
+    print(f"\nКластер содержит {len(cluster_segment_ids)} файлов")
+    
+    # ================================================
+    # 1. АНАЛИЗ ПАТТЕРНОВ С ПЕРЕКРЫТИЕМ
+    # ================================================
+    
+    all_pattern_segments = []
+    pattern_stats = []
+    pattern_features = []  # Для обучения классификатора
+    pattern_labels = []
+    
+    window_size = 30  # Размер окна для классификации
+    step_size = 10    # Шаг скользящего окна
+    
+    for file_idx, seg_id in enumerate(cluster_segment_ids):
+        if seg_id >= len(segments):
+            continue
+            
+        segment = segments[seg_id]
+        file_name = segment['file_name_original'].iloc[0]
+        
+        print(f"\n  Анализ файла {file_idx+1}/{len(cluster_segment_ids)}: {file_name}")
+        print(f"    Кадров: {len(segment)}")
+        
+        data = segment[feature_columns].values
+        
+        # Используем скользящее окно для выделения паттернов
+        for start_idx in range(0, len(data) - window_size, step_size):
+            end_idx = start_idx + window_size
+            pattern_data = data[start_idx:end_idx]
+            
+            # Характеристики окна
+            features = []
+            for col_idx in range(pattern_data.shape[1]):
+                col_data = pattern_data[:, col_idx]
+                features.extend([
+                    np.mean(col_data),
+                    np.std(col_data),
+                    np.min(col_data),
+                    np.max(col_data),
+                    np.percentile(col_data, 25),
+                    np.percentile(col_data, 75),
+                    np.mean(np.diff(col_data)) if len(col_data) > 1 else 0,  # среднее изменение
+                    np.std(np.diff(col_data)) if len(col_data) > 1 else 0,   # волатильность изменений
+                ])
+            
+            # Корреляции между признаками
+            if pattern_data.shape[1] > 1 and len(pattern_data) > 1:
+                corr_matrix = np.corrcoef(pattern_data.T)
+                # Берем только верхний треугольник без диагонали
+                corr_values = []
+                for i in range(corr_matrix.shape[0]):
+                    for j in range(i+1, corr_matrix.shape[1]):
+                        corr_values.append(corr_matrix[i, j])
+                features.extend(corr_values)
+            else:
+                features.extend([0, 0, 0])  # Для трех параметров - 3 корреляции
+            
+            pattern_features.append(features)
+            
+            # Сохраняем сам паттерн для обучения моделей
+            pattern_segment = segment.iloc[start_idx:end_idx].copy()
+            pattern_segment['source_file'] = file_name
+            pattern_segment['window_start'] = start_idx
+            pattern_segment['window_end'] = end_idx
+            all_pattern_segments.append(pattern_segment)
+            
+            # Статистика
+            pattern_stats.append({
+                'source_file': file_name,
+                'window_start': start_idx,
+                'window_end': end_idx,
+                'length': window_size,
+                'left_ear_mean': np.mean(pattern_data[:, 0]),
+                'right_ear_mean': np.mean(pattern_data[:, 1]),
+                'mar_mean': np.mean(pattern_data[:, 2]),
+                'left_ear_std': np.std(pattern_data[:, 0]),
+                'right_ear_std': np.std(pattern_data[:, 1]),
+                'mar_std': np.std(pattern_data[:, 2])
+            })
+    
+    print(f"\nВсего выделено {len(all_pattern_segments)} окон по {window_size} кадров")
+    
+    # ================================================
+    # 2. КЛАСТЕРИЗАЦИЯ ОКОН
+    # ================================================
+    
+    print(f"\n--- Кластеризация окон ---")
+    
+    # Нормализация признаков
+    X_pattern = np.array(pattern_features)
+    scaler_features = StandardScaler()
+    X_pattern_scaled = scaler_features.fit_transform(X_pattern)
+    
+    # Определяем оптимальное количество кластеров
+    best_n_clusters = 2
+    best_score = -1
+    
+    for n_clusters in range(2, min(8, len(X_pattern) // 3)):
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(X_pattern_scaled)
+        score = silhouette_score(X_pattern_scaled, labels)
+        
+        if score > best_score:
+            best_score = score
+            best_n_clusters = n_clusters
+    
+    # Финальная кластеризация
+    kmeans = KMeans(n_clusters=best_n_clusters, random_state=42, n_init=10)
+    window_clusters = kmeans.fit_predict(X_pattern_scaled)
+    
+    # Сохраняем метки для каждого окна
+    for i, pattern_seg in enumerate(all_pattern_segments):
+        pattern_seg['pattern_type'] = window_clusters[i]
+    
+    pattern_stats_df = pd.DataFrame(pattern_stats)
+    pattern_stats_df['pattern_type'] = window_clusters
+    
+    print(f"Выделено {best_n_clusters} типов паттернов:")
+    for pt in range(best_n_clusters):
+        pt_count = np.sum(window_clusters == pt)
+        print(f"  Тип {pt}: {pt_count} окон")
+    
+    # Сохраняем статистику
+    pattern_stats_df.to_excel(f'cluster_{cluster_id}_windows.xlsx', index=False)
+    
+    # ================================================
+    # 3. ОБУЧЕНИЕ КЛАССИФИКАТОРА ТИПОВ ПАТТЕРНОВ
+    # ================================================
+    
+    print(f"\n--- Обучение классификатора типов паттернов ---")
+    
+    # Разделяем на train/test
+    X_train_clf, X_test_clf, y_train_clf, y_test_clf = train_test_split(
+        X_pattern_scaled, window_clusters, test_size=0.2, random_state=42, stratify=window_clusters
+    )
+    
+    # Обучаем Random Forest классификатор
+    clf = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+    clf.fit(X_train_clf, y_train_clf)
+    
+    # Оценка качества классификатора
+    y_pred_clf = clf.predict(X_test_clf)
+    accuracy = accuracy_score(y_test_clf, y_pred_clf)
+    print(f"Точность классификатора: {accuracy:.3f}")
+    
+    # Сохраняем классификатор
+    joblib.dump(clf, f'cluster_{cluster_id}_pattern_classifier.pkl')
+    joblib.dump(scaler_features, f'cluster_{cluster_id}_feature_scaler.pkl')
+    
+    # ================================================
+    # 4. ОБУЧЕНИЕ СПЕЦИАЛИЗИРОВАННЫХ МОДЕЛЕЙ
+    # ================================================
+    
+    print(f"\n--- Обучение специализированных моделей для каждого типа паттерна ---")
+    
+    type_models = {}
+    type_scalers_X = {}
+    type_scalers_y = {}
+    type_results = {}
+    
+    for pattern_type in range(best_n_clusters):
+        print(f"\n  Обучение модели для типа {pattern_type}")
+        
+        # Собираем все окна этого типа
+        type_windows = [all_pattern_segments[i] for i in range(len(all_pattern_segments)) 
+                       if window_clusters[i] == pattern_type]
+        
+        if not type_windows:
+            print(f"    Нет данных для типа {pattern_type}")
+            continue
+        
+        # Объединяем данные
+        type_df = pd.concat(type_windows, ignore_index=True)
+        
+        print(f"    Собрано {len(type_windows)} окон, всего {len(type_df)} кадров")
+        
+        if len(type_df) < 300:
+            print(f"    Недостаточно данных: {len(type_df)} < 300")
+            continue
+        
+        # Подготовка данных с перекрытием для увеличения количества примеров
+        sequence_length = 15
+        
+        X_data = type_df[feature_columns].values
+        y_data = type_df[target_columns].values
+        
+        X, y = [], []
+        # Используем перекрывающиеся окна с шагом 1
+        for i in range(0, len(X_data) - sequence_length - 50, 1):  # Шаг 1 для максимизации данных
+            X.append(X_data[i:i+sequence_length])
+            y.append(y_data[i+sequence_length])
+        
+        X = np.array(X)
+        y = np.array(y)
+        
+        if len(X) < 200:
+            print(f"    Слишком мало последовательностей: {len(X)}")
+            continue
+        
+        print(f"    Создано {len(X)} последовательностей")
+        
+        # Разделение с сохранением порядка
+        total_samples = len(X)
+        train_size = int(total_samples * 0.7)
+        val_size = int(total_samples * 0.15)
+        
+        X_train, y_train = X[:train_size], y[:train_size]
+        X_val, y_val = X[train_size:train_size+val_size], y[train_size:train_size+val_size]
+        X_test, y_test = X[train_size+val_size:], y[train_size+val_size:]
+        
+        # Нормализация
+        X_scalers = []
+        y_scalers = []
+        
+        X_train_scaled = np.zeros_like(X_train)
+        X_val_scaled = np.zeros_like(X_val)
+        X_test_scaled = np.zeros_like(X_test)
+        
+        for feature_idx in range(X_train.shape[2]):
+            scaler = MinMaxScaler()
+            scaler.fit(X_train[:, :, feature_idx].reshape(-1, 1))
+            
+            X_train_scaled[:, :, feature_idx] = scaler.transform(
+                X_train[:, :, feature_idx].reshape(-1, 1)
+            ).reshape(X_train.shape[0], X_train.shape[1])
+            
+            X_val_scaled[:, :, feature_idx] = scaler.transform(
+                X_val[:, :, feature_idx].reshape(-1, 1)
+            ).reshape(X_val.shape[0], X_val.shape[1])
+            
+            X_test_scaled[:, :, feature_idx] = scaler.transform(
+                X_test[:, :, feature_idx].reshape(-1, 1)
+            ).reshape(X_test.shape[0], X_test.shape[1])
+            
+            X_scalers.append(scaler)
+        
+        y_train_scaled = np.zeros_like(y_train)
+        y_val_scaled = np.zeros_like(y_val)
+        y_test_scaled = np.zeros_like(y_test)
+        
+        for target_idx in range(y_train.shape[1]):
+            scaler = MinMaxScaler()
+            scaler.fit(y_train[:, target_idx].reshape(-1, 1))
+            
+            y_train_scaled[:, target_idx] = scaler.transform(
+                y_train[:, target_idx].reshape(-1, 1)
+            ).flatten()
+            
+            y_val_scaled[:, target_idx] = scaler.transform(
+                y_val[:, target_idx].reshape(-1, 1)
+            ).flatten()
+            
+            y_test_scaled[:, target_idx] = scaler.transform(
+                y_test[:, target_idx].reshape(-1, 1)
+            ).flatten()
+            
+            y_scalers.append(scaler)
+        
+        # Упрощенная архитектура для предотвращения переобучения
+        input_shape = (X_train.shape[1], X_train.shape[2])
+        output_shape = len(target_columns)
+        
+        model = Sequential([
+            LSTM(64, return_sequences=True, input_shape=input_shape, dropout=0.2),
+            LSTM(32, return_sequences=False, dropout=0.2),
+            Dense(32, activation='relu'),
+            Dropout(0.2),
+            Dense(16, activation='relu'),
+            Dropout(0.2),
+            Dense(output_shape)
+        ])
+        
+        model.compile(
+            optimizer=Adam(learning_rate=0.001),
+            loss='mse',
+            metrics=['mae']
+        )
+        
+        # Callbacks
+        callbacks = [
+            EarlyStopping(monitor='val_loss', patience=20, restore_best_weights=True),
+            ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=10, min_lr=1e-6)
+        ]
+        
+        # Обучение
+        history = model.fit(
+            X_train_scaled, y_train_scaled,
+            validation_data=(X_val_scaled, y_val_scaled),
+            epochs=150,
+            batch_size=32,
+            callbacks=callbacks,
+            verbose=0
+        )
+        
+        # Оценка на тестовых данных этого типа
+        y_pred_scaled = model.predict(X_test_scaled, verbose=0)
+        
+        y_pred = np.zeros_like(y_pred_scaled)
+        y_true = np.zeros_like(y_test)
+        
+        for target_idx in range(y_pred_scaled.shape[1]):
+            y_pred[:, target_idx] = y_scalers[target_idx].inverse_transform(
+                y_pred_scaled[:, target_idx].reshape(-1, 1)
+            ).flatten()
+            y_true[:, target_idx] = y_scalers[target_idx].inverse_transform(
+                y_test[:, target_idx].reshape(-1, 1)
+            ).flatten()
+        
+        # Метрики
+        metrics = {}
+        for idx, param_name in enumerate(target_columns):
+            errors = y_pred[:, idx] - y_true[:, idx]
+            
+            safe_mape = []
+            for i in range(len(y_true)):
+                if abs(y_true[i, idx]) > 1e-10:
+                    safe_mape.append(abs(errors[i] / y_true[i, idx]) * 100)
+                else:
+                    safe_mape.append(abs(errors[i]) * 100)
+            
+            metrics[param_name] = {
+                'mape': np.mean(safe_mape),
+                'mae': np.mean(np.abs(errors))
+            }
+        
+        avg_mape = np.mean([m['mape'] for m in metrics.values()])
+        
+        print(f"    Результаты для типа {pattern_type}:")
+        for param_name in target_columns:
+            print(f"      {param_name}: {metrics[param_name]['mape']:.2f}%")
+        print(f"      Средний MAPE: {avg_mape:.2f}%")
+        
+        # Сохраняем модель
+        model_path = f'lstm_model_cluster_{cluster_id}_type_{pattern_type}.keras'
+        model.save(model_path)
+        
+        type_models[pattern_type] = model
+        type_scalers_X[pattern_type] = X_scalers
+        type_scalers_y[pattern_type] = y_scalers
+        type_results[pattern_type] = {
+            'avg_mape': avg_mape,
+            'metrics': metrics,
+            'n_windows': len(type_windows),
+            'total_frames': len(type_df)
+        }
+    
+    if not type_models:
+        print("  Не удалось обучить ни одной модели")
+        return None
+    
+    # ================================================
+    # 5. ТЕСТИРОВАНИЕ ГИБРИДНОГО ПОДХОДА
+    # ================================================
+    
+    print(f"\n--- Тестирование гибридного подхода на файлах ---")
+    
+    file_test_results = []
+    all_predictions_data = []  # Для сохранения прогнозов для визуализации
+    
+    for file_idx, seg_id in enumerate(cluster_segment_ids):
+        if seg_id >= len(segments):
+            continue
+        
+        segment = segments[seg_id]
+        file_name = segment['file_name_original'].iloc[0]
+        
+        print(f"\n  Тестирование файла: {file_name}")
+        
+        data = segment[feature_columns].values
+        
+        # Будем применять модель в реальном времени:
+        # для каждого временного шага определяем тип паттерна по последним window_size точкам
+        sequence_length = 15
+        
+        all_predictions = []
+        all_actuals = []
+        type_usage = []
+        
+        for i in range(sequence_length, len(data)):
+            # Текущий контекст для классификации (последние window_size точек)
+            context_start = max(0, i - window_size)
+            context_data = data[context_start:i]
+            
+            # Если контекста достаточно, классифицируем тип
+            if len(context_data) >= window_size // 2:
+                # Извлекаем признаки для классификации
+                context_features = []
+                for col_idx in range(context_data.shape[1]):
+                    col_data = context_data[:, col_idx]
+                    context_features.extend([
+                        np.mean(col_data),
+                        np.std(col_data),
+                        np.min(col_data),
+                        np.max(col_data),
+                        np.percentile(col_data, 25) if len(col_data) > 0 else 0,
+                        np.percentile(col_data, 75) if len(col_data) > 0 else 0,
+                        np.mean(np.diff(col_data)) if len(col_data) > 1 else 0,
+                        np.std(np.diff(col_data)) if len(col_data) > 1 else 0,
+                    ])
+                
+                # Корреляции
+                if context_data.shape[1] > 1 and len(context_data) > 1:
+                    corr_matrix = np.corrcoef(context_data.T)
+                    corr_values = []
+                    for ci in range(corr_matrix.shape[0]):
+                        for cj in range(ci+1, corr_matrix.shape[1]):
+                            corr_values.append(corr_matrix[ci, cj])
+                    context_features.extend(corr_values)
+                else:
+                    context_features.extend([0, 0, 0])
+                
+                # Масштабируем и предсказываем тип
+                try:
+                    context_features_scaled = scaler_features.transform([context_features])
+                    pattern_type_pred = clf.predict(context_features_scaled)[0]
+                except:
+                    pattern_type_pred = 0
+            else:
+                # Если мало контекста, используем тип 0
+                pattern_type_pred = 0
+            
+            # Используем соответствующую модель для прогноза
+            if pattern_type_pred in type_models:
+                model = type_models[pattern_type_pred]
+                X_scalers = type_scalers_X[pattern_type_pred]
+                y_scalers = type_scalers_y[pattern_type_pred]
+                
+                # Подготовка последовательности для LSTM
+                X_seq = data[i-sequence_length:i]
+                
+                # Масштабирование
+                X_scaled = np.zeros((1, sequence_length, len(feature_columns)))
+                valid_scale = True
+                for feature_idx in range(len(feature_columns)):
+                    try:
+                        scaler = X_scalers[feature_idx]
+                        feature_data = X_seq[:, feature_idx].reshape(-1, 1)
+                        feature_scaled = scaler.transform(feature_data).flatten()
+                        X_scaled[0, :, feature_idx] = feature_scaled
+                    except:
+                        valid_scale = False
+                        break
+                
+                if not valid_scale:
+                    continue
+                
+                # Прогноз
+                try:
+                    y_pred_scaled = model.predict(X_scaled, verbose=0)
+                    
+                    # Обратное масштабирование
+                    y_pred = np.zeros(len(target_columns))
+                    for target_idx in range(len(target_columns)):
+                        y_pred[target_idx] = y_scalers[target_idx].inverse_transform(
+                            y_pred_scaled[:, target_idx].reshape(-1, 1)
+                        ).flatten()[0]
+                    
+                    all_predictions.append(y_pred)
+                    all_actuals.append(data[i])
+                    type_usage.append(pattern_type_pred)
+                except:
+                    continue
+            else:
+                # Если модели нет, пропускаем
+                continue
+        
+        if not all_predictions:
+            print(f"    Нет прогнозов для файла {file_name}")
+            continue
+        
+        all_predictions = np.array(all_predictions)
+        all_actuals = np.array(all_actuals)
+        type_usage = np.array(type_usage)
+        
+        # Сохраняем для визуализации
+        all_predictions_data.append({
+            'file_name': file_name,
+            'predictions': all_predictions,
+            'actuals': all_actuals,
+            'type_usage': type_usage
+        })
+        
+        # Статистика использования типов
+        unique, counts = np.unique(type_usage, return_counts=True)
+        type_distribution = dict(zip(unique, counts))
+        print(f"    Распределение типов: {type_distribution}")
+        
+        # Расчет метрик
+        file_metrics = {}
+        for idx, param_name in enumerate(target_columns):
+            errors = all_predictions[:, idx] - all_actuals[:, idx]
+            
+            safe_mape = []
+            for j in range(len(all_actuals)):
+                if abs(all_actuals[j, idx]) > 1e-10:
+                    safe_mape.append(abs(errors[j] / all_actuals[j, idx]) * 100)
+                else:
+                    safe_mape.append(abs(errors[j]) * 100)
+            
+            file_metrics[param_name] = np.mean(safe_mape)
+        
+        avg_mape = np.mean(list(file_metrics.values()))
+        
+        file_test_results.append({
+            'file_name': file_name,
+            'avg_mape': avg_mape,
+            'left_ear_mape': file_metrics['left_ear'],
+            'right_ear_mape': file_metrics['right_ear'],
+            'mar_mape': file_metrics['mar'],
+            'n_predictions': len(all_predictions),
+            'type_distribution': str(type_distribution)
+        })
+        
+        print(f"    Результаты:")
+        print(f"      left_ear: {file_metrics['left_ear']:.2f}%")
+        print(f"      right_ear: {file_metrics['right_ear']:.2f}%")
+        print(f"      mar: {file_metrics['mar']:.2f}%")
+        print(f"      Средний MAPE: {avg_mape:.2f}%")
+    
+    if not file_test_results:
+        print("  Не удалось получить результаты ни для одного файла")
+        return None
+    
+    avg_file_mape = np.mean([r['avg_mape'] for r in file_test_results])
+    
+    print(f"\nСредний MAPE по всем файлам: {avg_file_mape:.2f}%")
+    
+    # ================================================
+    # 6. ВИЗУАЛИЗАЦИЯ РЕЗУЛЬТАТОВ
+    # ================================================
+    
+    print(f"\n--- Создание визуализаций ---")
+    
+    # Визуализация для каждого файла
+    for pred_data in all_predictions_data[:3]:  # Визуализируем первые 3 файла
+        file_name = pred_data['file_name']
+        save_path = f'hybrid_predictions_cluster_{cluster_id}_{file_name.replace(".", "_")}.png'
+        
+        visualize_hybrid_predictions(
+            cluster_id, file_name,
+            pred_data['predictions'], pred_data['actuals'],
+            pred_data['type_usage'], feature_columns,
+            save_path=save_path
+        )
+        print(f"    Визуализация сохранена: {save_path}")
+    
+    # Визуализация сравнения типов паттернов
+    if type_results:
+        visualize_types_comparison(
+            cluster_id, type_results, feature_columns, pattern_stats_df,
+            save_path=f'cluster_{cluster_id}_types_comparison.png'
+        )
+        print(f"  Визуализация типов сохранена: cluster_{cluster_id}_types_comparison.png")
+    
+    # Визуализация сравнения подходов
+    visualize_hybrid_comparison(
+        cluster_id, lstm_mape_results, type_results, file_test_results,
+        save_path=f'cluster_{cluster_id}_hybrid_comparison.png'
+    )
+    print(f"  Сравнительная визуализация сохранена: cluster_{cluster_id}_hybrid_comparison.png")
+    
+    # ================================================
+    # 7. СРАВНЕНИЕ С ИСХОДНОЙ МОДЕЛЬЮ
+    # ================================================
+    
+    original_mape = None
+    if cluster_id in lstm_mape_results:
+        original_mape = lstm_mape_results[cluster_id]['total_mape']
+        
+        improvement = ((original_mape - avg_file_mape) / original_mape) * 100
+        
+        print(f"\nСравнение с исходной моделью:")
+        print(f"  Исходная модель: MAPE={original_mape:.2f}%")
+        print(f"  Гибридный подход: MAPE={avg_file_mape:.2f}%")
+        print(f"  Улучшение: {improvement:.1f}%")
+        
+        if improvement > 0:
+            print(f"  ✅ УЛУЧШЕНИЕ НА {improvement:.1f}%")
+        else:
+            print(f"  ❌ УХУДШЕНИЕ НА {abs(improvement):.1f}%")
+    
+    # ================================================
+    # 8. СОХРАНЕНИЕ РЕЗУЛЬТАТОВ
+    # ================================================
+    
+    # Результаты по типам
+    type_results_df = pd.DataFrame([
+        {
+            'pattern_type': pt,
+            'avg_mape': info['avg_mape'],
+            'left_ear_mape': info['metrics']['left_ear']['mape'],
+            'right_ear_mape': info['metrics']['right_ear']['mape'],
+            'mar_mape': info['metrics']['mar']['mape'],
+            'n_windows': info['n_windows'],
+            'total_frames': info['total_frames']
+        }
+        for pt, info in type_results.items()
+    ])
+    type_results_df.to_excel(f'cluster_{cluster_id}_hybrid_types.xlsx', index=False)
+    
+    # Результаты на файлах
+    file_results_df = pd.DataFrame(file_test_results)
+    file_results_df.to_excel(f'cluster_{cluster_id}_hybrid_results.xlsx', index=False)
+    
+    # Сводный отчет
+    summary = {
+        'cluster_id': cluster_id,
+        'n_files': len(cluster_segment_ids),
+        'n_windows_total': len(all_pattern_segments),
+        'n_pattern_types': best_n_clusters,
+        'classifier_accuracy': accuracy,
+        'avg_mape_on_files': avg_file_mape,
+        'original_mape': original_mape if original_mape else 0,
+        'improvement_percent': ((original_mape - avg_file_mape) / original_mape * 100) if original_mape and original_mape > 0 else 0,
+        'status': 'Улучшен' if (original_mape and avg_file_mape < original_mape) else 'Без изменений'
+    }
+    
+    summary_df = pd.DataFrame([summary])
+    summary_df.to_excel(f'cluster_{cluster_id}_hybrid_summary.xlsx', index=False)
+    
+    return summary
+
+# ================================================
+# ПРИМЕНЕНИЕ ГИБРИДНОГО ПОДХОДА
+# ================================================
+
 print("\n" + "="*60)
-print("ОСНОВНЫЕ ИЗМЕНЕНИЯ:")
+print("ПОИСК КЛАСТЕРОВ ДЛЯ ГИБРИДНОГО УЛУЧШЕНИЯ")
 print("="*60)
-print("1. Модель теперь принимает на вход все 3 параметра (left_ear, right_ear, mar)")
-print("2. Модель теперь прогнозирует все 3 параметра одновременно")
-print("3. Архитектура LSTM адаптирована для многомерного выхода")
-print("4. Метрики качества вычисляются для каждого параметра отдельно")
-print("5. Визуализации создаются для всех 3 параметров")
-print("6. Все модели сохранены с суффиксом '_3outputs'")
-print("7. Результаты сохраняются в отдельных файлах Excel для каждого кластера")
-print("8. Созданы сводные таблицы по всем параметрам")
+
+# Находим проблемные кластеры
+problematic_clusters_v4 = []
+
+if 'lstm_mape_results' in globals():
+    for cluster_id, metrics in lstm_mape_results.items():
+        if metrics['total_mape'] > 10:
+            problematic_clusters_v4.append({
+                'cluster_id': cluster_id,
+                'mape': metrics['total_mape'],
+                'files_count': len(features_df[features_df['cluster'] == cluster_id])
+            })
+            print(f"Кластер {cluster_id}: MAPE={metrics['total_mape']:.2f}% "
+                  f"({len(features_df[features_df['cluster'] == cluster_id])} файлов)")
+
+# Применяем гибридный подход
+hybrid_results = {}
+
+for cluster_info in problematic_clusters_v4:
+    cluster_id = cluster_info['cluster_id']
+    
+    print(f"\n{'#'*60}")
+    print(f"ГИБРИДНОЕ УЛУЧШЕНИЕ КЛАСТЕРА {cluster_id}")
+    print(f"{'#'*60}")
+    
+    result = hybrid_cluster_improvement_v4(
+        cluster_id=cluster_id,
+        segments=segments,
+        features_df=features_df
+    )
+    
+    if result:
+        hybrid_results[cluster_id] = result
+
+# ================================================
+# ИТОГОВЫЙ ОТЧЕТ
+# ================================================
+
+if hybrid_results:
+    print("\n" + "="*60)
+    print("ИТОГОВЫЙ ОТЧЕТ ПО ГИБРИДНОМУ УЛУЧШЕНИЮ")
+    print("="*60)
+    
+    final_summary = pd.DataFrame([
+        {
+            'Cluster_ID': r['cluster_id'],
+            'Files': r['n_files'],
+            'Windows': r['n_windows_total'],
+            'Pattern_Types': r['n_pattern_types'],
+            'Classifier_Acc': round(r['classifier_accuracy'], 3),
+            'Hybrid_MAPE': round(r['avg_mape_on_files'], 2),
+            'Original_MAPE': round(r['original_mape'], 2),
+            'Improvement_%': round(r['improvement_percent'], 1),
+            'Status': r['status']
+        }
+        for r in hybrid_results.values()
+    ])
+    
+    final_summary.to_excel('hybrid_improvement_summary.xlsx', index=False)
+    
+    print("\nРезультаты гибридного улучшения:")
+    print(final_summary.to_string())
+    
+    # Визуализация
+    if len(final_summary) > 0:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        x = range(len(final_summary))
+        width = 0.35
+        
+        original = ax.bar([i - width/2 for i in x], final_summary['Original_MAPE'].values,
+                         width, label='Исходная модель', color='red', alpha=0.7)
+        hybrid = ax.bar([i + width/2 for i in x], final_summary['Hybrid_MAPE'].values,
+                         width, label='Гибридный подход', color='green', alpha=0.7)
+        
+        ax.set_xlabel('Кластер')
+        ax.set_ylabel('MAPE (%)')
+        ax.set_title('Сравнение: исходная модель vs гибридный подход')
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'Кластер {id}' for id in final_summary['Cluster_ID'].values])
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Добавляем значения
+        for bars in [original, hybrid]:
+            for bar in bars:
+                height = bar.get_height()
+                ax.annotate(f'{height:.1f}%',
+                           xy=(bar.get_x() + bar.get_width()/2, height),
+                           xytext=(0, 3),
+                           textcoords="offset points",
+                           ha='center', va='bottom', fontsize=8)
+        
+        plt.tight_layout()
+        plt.savefig('hybrid_improvement_comparison.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print("\nГрафик сохранен как 'hybrid_improvement_comparison.png'")
+    
+    # Финальная визуализация всех результатов
+    visualize_all_hybrid_results(hybrid_results, lstm_mape_results, features_df)
+
+print("\n" + "="*60)
+print("КЛЮЧЕВЫЕ ОСОБЕННОСТИ ГИБРИДНОГО ПОДХОДА:")
+print("="*60)
+print("1. Используем скользящие окна для выделения паттернов")
+print("2. Обучаем классификатор для определения типа паттерна в реальном времени")
+print("3. Для каждого типа - своя специализированная LSTM модель")
+print("4. На тестировании: сначала классифицируем тип, затем применяем соответствующую модель")
+print("5. Сохраняем временной контекст для классификации")
+print("6. Учитываем перекрытие окон для увеличения данных")
+print("7. Random Forest классификатор для надежного определения типов")
+print("8. Подробная визуализация результатов для каждого файла и кластера")
